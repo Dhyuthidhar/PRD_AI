@@ -1,11 +1,20 @@
-import * as pdfjsLib from 'pdfjs-dist'
+import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs'
 import mammoth from 'mammoth'
 import sharp from 'sharp'
 import { supabaseAdmin } from './supabase'
 
-// Configure PDF.js worker
+// Configure PDF.js worker for server-side usage
 if (typeof window === 'undefined') {
-  pdfjsLib.GlobalWorkerOptions.workerSrc = require('pdfjs-dist/build/pdf.worker.entry.js')
+  try {
+    // Use import.meta.url for ESM compatibility with Next.js 16 and Turbopack
+    pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
+      'pdfjs-dist/legacy/build/pdf.worker.min.mjs',
+      import.meta.url
+    ).toString()
+  } catch (error) {
+    // Fallback to string path if import.meta.url fails
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'pdfjs-dist/legacy/build/pdf.worker.min.mjs'
+  }
 }
 
 export interface ProcessedDocument {
@@ -31,7 +40,7 @@ export class DocumentProcessor {
 
       // Download file from Supabase Storage
       const { data: fileBlob, error: downloadError } = await supabaseAdmin.storage
-        .from('prd-uploads')
+        .from(process.env.SUPABASE_STORAGE_BUCKET || 'prd-uploads')
         .download(fileData.storage_path)
 
       if (downloadError || !fileBlob) {

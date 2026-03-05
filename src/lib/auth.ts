@@ -1,5 +1,5 @@
 import bcrypt from 'bcryptjs'
-import jwt from 'jsonwebtoken'
+import jwt, { SignOptions } from 'jsonwebtoken'
 import { User } from '@/types'
 import { supabaseAdmin } from './supabase'
 
@@ -31,7 +31,7 @@ export class AuthService {
         role: user.role 
       },
       JWT_SECRET,
-      { expiresIn: '24h' }
+      { expiresIn: process.env.JWT_EXPIRES_IN || '24h' } as SignOptions
     )
   }
 

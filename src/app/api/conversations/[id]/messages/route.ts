@@ -1,58 +1,66 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { supabaseAdmin } from '@/lib/supabase'
-import { authService } from '@/lib/auth'
+import { getAuthUser } from '@/lib/api/auth-guard'
+import { validateBody, schemas } from '@/lib/api/validate'
+import { createRequestId, parseJson, addRequestIdHeader } from '@/lib/api/request'
+import { toErrorResponse } from '@/lib/api/errors'
+import { Logger } from '@/lib/api/logger'
 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  const requestId = createRequestId()
+  const startTime = Date.now()
+  const route = '/api/conversations/[id]/messages'
+  
   try {
-    const token = request.cookies.get('auth-token')?.value
-    if (!token) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-    }
-
-    const decoded = authService.verifyToken(token)
     const { id: conversationId } = await params
-    const messageData = await request.json()
-
-    // Verify conversation belongs to user
-    const { data: conversation, error } = await supabaseAdmin
-      .from('conversations')
-      .select('*')
-      .eq('id', conversationId)
-      .eq('user_id', decoded.userId)
-      .single()
-
-    if (error || !conversation) {
-      return NextResponse.json({ error: 'Conversation not found' }, { status: 404 })
-    }
-
-    // Add message to conversation
-    const updatedMessages = [...conversation.messages, {
-      id: Date.now().toString(),
+    const { userId } = getAuthUser(request)
+    const messageData = validateBody(schemas.conversation.message, await parseJson(request))
+    
+    // Validate conversation ID format
+    schemas.uuid.parse(conversationId)
+    
+    // Create message with UUID and timestamp
+    const messageWithMeta = {
+      id: crypto.randomUUID(),
       ...messageData,
       timestamp: new Date().toISOString()
-    }]
-
-    // Update conversation
-    const { data: updatedConversation, error: updateError } = await supabaseAdmin
-      .from('conversations')
-      .update({
-        messages: updatedMessages,
-        last_modified: new Date().toISOString()
-      })
-      .eq('id', conversationId)
-      .select()
-      .single()
-
-    if (updateError) {
-      throw updateError
     }
-
-    return NextResponse.json({ message: 'Message added successfully' })
+    
+    // Use atomic RPC function to prevent race conditions
+    const { data, error } = await supabaseAdmin.rpc('append_conversation_message', {
+      p_conversation_id: conversationId,
+      p_user_id: userId,
+      p_message: messageWithMeta
+    })
+    
+    if (error) {
+      if (error.message?.includes('not found or access denied')) {
+        throw new Error('Conversation not found')
+      }
+      throw error
+    }
+    
+    Logger.info('Message added successfully', {
+      requestId,
+      route,
+      userId,
+      conversationId,
+      messageId: messageWithMeta.id,
+      durationMs: Date.now() - startTime
+    })
+    
+    const response = NextResponse.json({ 
+      message: 'Message added successfully',
+      messageId: messageWithMeta.id
+    })
+    return addRequestIdHeader(response, requestId)
+    
   } catch (error) {
-    console.error('Add message error:', error)
-    return NextResponse.json(
-      { error: 'Failed to add message' },
-      { status: 500 }
-    )
+    Logger.error('Failed to add message', error, {
+      requestId,
+      route,
+      userId: getAuthUser(request).userId
+    })
+    return addRequestIdHeader(toErrorResponse(error, requestId), requestId)
   }
 }
