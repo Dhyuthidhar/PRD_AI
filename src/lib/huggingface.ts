@@ -15,7 +15,7 @@ export interface GenerationConfig {
 }
 
 export class Qwen3Service {
-  private model = 'Qwen/Qwen2.5-7B-Instruct'
+  private model = process.env.HUGGINGFACE_MODEL || 'Qwen/Qwen2.5-7B-Instruct'
 
   async generateResponse(
     messages: ChatMessage[],

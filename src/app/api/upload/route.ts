@@ -43,7 +43,7 @@ export async function POST(request: NextRequest) {
 
     // Upload to Supabase Storage
     const { data: uploadData, error: uploadError } = await supabaseAdmin.storage
-      .from('prd-uploads')
+      .from(process.env.SUPABASE_STORAGE_BUCKET || 'prd-uploads')
       .upload(storagePath, buffer, {
         contentType: file.type,
         upsert: true

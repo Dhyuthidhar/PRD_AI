@@ -1,21 +1,19 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { supabaseAdmin } from '@/lib/supabase'
-import { authService } from '@/lib/auth'
+import { getAuthUser } from '@/lib/api/auth-guard'
+import { validateBody, schemas } from '@/lib/api/validate'
+import { createRequestId, parseJson, addRequestIdHeader } from '@/lib/api/request'
+import { toErrorResponse } from '@/lib/api/errors'
+import { Logger } from '@/lib/api/logger'
 
 export async function GET(request: NextRequest) {
+  const requestId = createRequestId()
+  const startTime = Date.now()
+  const route = '/api/conversations'
+  
   try {
-    const token = request.cookies.get('auth-token')?.value
-
-    if (!token) {
-      return NextResponse.json(
-        { error: 'Unauthorized' },
-        { status: 401 }
-      )
-    }
-
-    const decoded = authService.verifyToken(token)
-    const userId = decoded.userId
-
+    const { userId } = getAuthUser(request)
+    
     const { data, error } = await supabaseAdmin
       .from('conversations')
       .select('*')
@@ -26,30 +24,31 @@ export async function GET(request: NextRequest) {
       throw error
     }
 
-    return NextResponse.json({ conversations: data || [] })
+    Logger.info('Conversations fetched', {
+      requestId,
+      route,
+      userId,
+      count: data?.length || 0,
+      durationMs: Date.now() - startTime
+    })
+
+    const response = NextResponse.json({ conversations: data || [] })
+    return addRequestIdHeader(response, requestId)
+    
   } catch (error) {
-    console.error('Failed to fetch conversations:', error)
-    return NextResponse.json(
-      { error: 'Failed to fetch conversations' },
-      { status: 500 }
-    )
+    Logger.error('Failed to fetch conversations', error, { requestId, route })
+    return addRequestIdHeader(toErrorResponse(error, requestId), requestId)
   }
 }
 
 export async function POST(request: NextRequest) {
+  const requestId = createRequestId()
+  const startTime = Date.now()
+  const route = '/api/conversations'
+  
   try {
-    const token = request.cookies.get('auth-token')?.value
-
-    if (!token) {
-      return NextResponse.json(
-        { error: 'Unauthorized' },
-        { status: 401 }
-      )
-    }
-
-    const decoded = authService.verifyToken(token)
-    const userId = decoded.userId
-    const { project_name } = await request.json()
+    const { userId } = getAuthUser(request)
+    const { project_name } = validateBody(schemas.conversation.create, await parseJson(request))
 
     const { data, error } = await supabaseAdmin
       .from('conversations')
@@ -66,12 +65,20 @@ export async function POST(request: NextRequest) {
       throw error
     }
 
-    return NextResponse.json({ conversation: data }, { status: 201 })
+    Logger.info('Conversation created', {
+      requestId,
+      route,
+      userId,
+      conversationId: data.id,
+      projectName: data.project_name,
+      durationMs: Date.now() - startTime
+    })
+
+    const response = NextResponse.json({ conversation: data }, { status: 201 })
+    return addRequestIdHeader(response, requestId)
+    
   } catch (error) {
-    console.error('Failed to create conversation:', error)
-    return NextResponse.json(
-      { error: 'Failed to create conversation' },
-      { status: 500 }
-    )
+    Logger.error('Failed to create conversation', error, { requestId, route })
+    return addRequestIdHeader(toErrorResponse(error, requestId), requestId)
   }
 }
