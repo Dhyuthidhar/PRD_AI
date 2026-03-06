@@ -48,10 +48,15 @@ export const schemas = {
   
   chat: z.object({
     conversationId: z.string().uuid('Invalid conversation ID'),
-    message: z.string().min(1, 'Message is required').max(10000, 'Message too long')
+    message: z.string().min(1, 'Message is required').max(5000, 'Message too long (max 5000 chars)')
   }),
   
   processDocument: z.object({
     fileId: z.string().uuid('Invalid file ID')
-  })
+  }),
+  
+  upload: {
+    // For query parameter validation
+    conversationId: z.string().uuid('Invalid conversation ID format')
+  }
 }

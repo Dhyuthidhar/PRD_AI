@@ -1,32 +1,35 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { qwen3Service, ChatMessage } from '@/lib/huggingface'
 import { supabaseAdmin } from '@/lib/supabase'
-import { authService } from '@/lib/auth'
+import { getAuthUser } from '@/lib/api/auth-guard'
+import { validateBody, schemas } from '@/lib/api/validate'
+import { createRequestId, parseJson, addRequestIdHeader } from '@/lib/api/request'
+import { toErrorResponse } from '@/lib/api/errors'
+import { Logger } from '@/lib/api/logger'
+import { enforceRateLimit } from '@/lib/api/rate-limit'
 
 export async function POST(request: NextRequest) {
+  const requestId = createRequestId()
+  const startTime = Date.now()
+  const route = '/api/chat'
+  
   try {
-    const token = request.cookies.get('auth-token')?.value
-    if (!token) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-    }
-
-    const decoded = authService.verifyToken(token)
-    const { conversationId, message } = await request.json()
-
-    if (!conversationId || !message) {
-      return NextResponse.json({ error: 'Missing conversation ID or message' }, { status: 400 })
-    }
+    // Rate limiting: 30 requests per 10 minutes per IP
+    enforceRateLimit(request, { limit: 30, windowMs: 10 * 60 * 1000 })
+    
+    const { userId } = getAuthUser(request)
+    const { conversationId, message } = validateBody(schemas.chat, await parseJson(request))
 
     // Get conversation history
     const { data: conversation, error } = await supabaseAdmin
       .from('conversations')
       .select('*')
       .eq('id', conversationId)
-      .eq('user_id', decoded.userId)
+      .eq('user_id', userId)
       .single()
 
     if (error || !conversation) {
-      return NextResponse.json({ error: 'Conversation not found' }, { status: 404 })
+      throw new Error('Conversation not found')
     }
 
     // Build message history for AI context
@@ -47,12 +50,21 @@ export async function POST(request: NextRequest) {
       temperature: 0.7
     })
 
-    return NextResponse.json({ response })
+    Logger.info('Chat response generated', {
+      requestId,
+      route,
+      userId,
+      conversationId,
+      messageLength: message.length,
+      responseLength: response.length,
+      durationMs: Date.now() - startTime
+    })
+
+    const responseData = NextResponse.json({ response })
+    return addRequestIdHeader(responseData, requestId)
+    
   } catch (error) {
-    console.error('Chat error:', error)
-    return NextResponse.json(
-      { error: 'Failed to generate response' },
-      { status: 500 }
-    )
+    Logger.error('Failed to generate chat response', error, { requestId, route })
+    return addRequestIdHeader(toErrorResponse(error, requestId), requestId)
   }
 }

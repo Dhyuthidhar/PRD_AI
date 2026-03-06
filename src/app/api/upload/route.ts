@@ -1,33 +1,48 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { supabaseAdmin } from '@/lib/supabase'
-import { authService } from '@/lib/auth'
+import { getAuthUser } from '@/lib/api/auth-guard'
+import { validateBody, schemas } from '@/lib/api/validate'
+import { createRequestId, readQueryParam, addRequestIdHeader } from '@/lib/api/request'
+import { toErrorResponse } from '@/lib/api/errors'
+import { Logger } from '@/lib/api/logger'
+import { enforceRateLimit } from '@/lib/api/rate-limit'
 import { fileTypeFromBuffer } from 'file-type'
 
 export async function POST(request: NextRequest) {
+  const requestId = createRequestId()
+  const startTime = Date.now()
+  const route = '/api/upload'
+  
   try {
-    const token = request.cookies.get('auth-token')?.value
-    if (!token) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-    }
-
-    const decoded = authService.verifyToken(token)
+    // Rate limiting: 20 requests per 10 minutes per IP
+    enforceRateLimit(request, { limit: 20, windowMs: 10 * 60 * 1000 })
+    
+    const { userId } = getAuthUser(request)
     const formData = await request.formData()
     const file = formData.get('file') as File
     const conversationId = formData.get('conversationId') as string
 
-    if (!file || !conversationId) {
-      return NextResponse.json({ error: 'Missing file or conversation ID' }, { status: 400 })
+    // Validate presence
+    if (!file) {
+      throw new Error('File is required')
     }
+    
+    if (!conversationId) {
+      throw new Error('Conversation ID is required')
+    }
+
+    // Validate conversation ID format
+    schemas.upload.conversationId.parse(conversationId)
 
     // File validation
     const maxSize = 25 * 1024 * 1024 // 25MB
     if (file.size > maxSize) {
-      return NextResponse.json({ error: 'File exceeds 25MB limit' }, { status: 400 })
+      throw new Error('File exceeds 25MB limit')
     }
 
     const allowedTypes = ['application/pdf', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'image/png', 'image/jpeg', 'image/jpg']
     if (!allowedTypes.includes(file.type)) {
-      return NextResponse.json({ error: 'Unsupported file type' }, { status: 400 })
+      throw new Error('Unsupported file type')
     }
 
     // Additional validation using file-type
@@ -35,11 +50,11 @@ export async function POST(request: NextRequest) {
     const fileType = await fileTypeFromBuffer(buffer)
     
     if (!fileType || !['pdf', 'docx', 'png', 'jpg', 'jpeg'].includes(fileType.ext)) {
-      return NextResponse.json({ error: 'Invalid file format' }, { status: 400 })
+      throw new Error('Invalid file format')
     }
 
     // Generate unique storage path
-    const storagePath = `${decoded.userId}/${conversationId}/${Date.now()}-${file.name}`
+    const storagePath = `${userId}/${conversationId}/${Date.now()}-${file.name}`
 
     // Upload to Supabase Storage
     const { data: uploadData, error: uploadError } = await supabaseAdmin.storage
@@ -50,8 +65,7 @@ export async function POST(request: NextRequest) {
       })
 
     if (uploadError) {
-      console.error('Upload error:', uploadError)
-      return NextResponse.json({ error: 'Failed to upload file' }, { status: 500 })
+      throw uploadError
     }
 
     // Save file metadata to database
@@ -68,13 +82,24 @@ export async function POST(request: NextRequest) {
       .single()
 
     if (dbError) {
-      console.error('Database error:', dbError)
-      return NextResponse.json({ error: 'Failed to save file metadata' }, { status: 500 })
+      throw dbError
     }
 
-    return NextResponse.json({ file: fileData }, { status: 201 })
+    Logger.info('File uploaded successfully', {
+      requestId,
+      route,
+      userId,
+      conversationId,
+      filename: file.name,
+      fileSize: file.size,
+      durationMs: Date.now() - startTime
+    })
+
+    const response = NextResponse.json({ file: fileData }, { status: 201 })
+    return addRequestIdHeader(response, requestId)
+    
   } catch (error) {
-    console.error('Upload error:', error)
-    return NextResponse.json({ error: 'Upload failed' }, { status: 500 })
+    Logger.error('Failed to upload file', error, { requestId, route })
+    return addRequestIdHeader(toErrorResponse(error, requestId), requestId)
   }
 }

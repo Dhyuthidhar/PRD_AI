@@ -1,28 +1,38 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { qwen3Service } from '@/lib/huggingface'
 import { supabaseAdmin } from '@/lib/supabase'
-import { authService } from '@/lib/auth'
+import { getAuthUser } from '@/lib/api/auth-guard'
+import { createRequestId, addRequestIdHeader } from '@/lib/api/request'
+import { toErrorResponse } from '@/lib/api/errors'
+import { Logger } from '@/lib/api/logger'
+import { enforceRateLimit } from '@/lib/api/rate-limit'
+import { schemas } from '@/lib/api/validate'
 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  const requestId = createRequestId()
+  const startTime = Date.now()
+  const route = '/api/conversations/[id]/generate-prd'
+  
   try {
-    const token = request.cookies.get('auth-token')?.value
-    if (!token) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-    }
-
-    const decoded = authService.verifyToken(token)
+    // Rate limiting: 10 requests per hour per userId+IP
+    enforceRateLimit(request, { limit: 10, windowMs: 60 * 60 * 1000 })
+    
+    const { userId } = getAuthUser(request)
     const { id: conversationId } = await params
+    
+    // Validate conversation ID format
+    schemas.uuid.parse(conversationId)
 
     // Get conversation
     const { data: conversation, error } = await supabaseAdmin
       .from('conversations')
       .select('*')
       .eq('id', conversationId)
-      .eq('user_id', decoded.userId)
+      .eq('user_id', userId)
       .single()
 
     if (error || !conversation) {
-      return NextResponse.json({ error: 'Conversation not found' }, { status: 404 })
+      throw new Error('Conversation not found')
     }
 
     // Extract conversation content for PRD generation
@@ -57,7 +67,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         
         sections[section] = response
       } catch (error) {
-        console.error(`Failed to extract ${section}:`, error)
+        Logger.error(`Failed to extract ${section}`, error, { requestId, route, conversationId })
         sections[section] = `Information about ${section.replace('_', ' ')} not found in conversation.`
       }
     }
@@ -81,15 +91,23 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       throw updateError
     }
 
-    return NextResponse.json({ 
+    Logger.info('PRD generated successfully', {
+      requestId,
+      route,
+      userId,
+      conversationId,
+      prdLength: prd.length,
+      durationMs: Date.now() - startTime
+    })
+
+    const response = NextResponse.json({ 
       prd,
       conversation: updatedConversation 
     })
+    return addRequestIdHeader(response, requestId)
+    
   } catch (error) {
-    console.error('PRD generation error:', error)
-    return NextResponse.json(
-      { error: 'Failed to generate PRD' },
-      { status: 500 }
-    )
+    Logger.error('Failed to generate PRD', error, { requestId, route })
+    return addRequestIdHeader(toErrorResponse(error, requestId), requestId)
   }
 }

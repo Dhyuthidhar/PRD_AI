@@ -1,65 +1,100 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { supabaseAdmin } from '@/lib/supabase'
-import { authService } from '@/lib/auth'
+import { getAuthUser } from '@/lib/api/auth-guard'
+import { createRequestId, readQueryParam, addRequestIdHeader } from '@/lib/api/request'
+import { toErrorResponse } from '@/lib/api/errors'
+import { Logger } from '@/lib/api/logger'
+import { enforceRateLimit } from '@/lib/api/rate-limit'
+import { schemas } from '@/lib/api/validate'
 import { marked } from 'marked'
 import jsPDF from 'jspdf'
 
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  const requestId = createRequestId()
+  const startTime = Date.now()
+  const route = '/api/conversations/[id]/export'
+  
   try {
-    const token = request.cookies.get('auth-token')?.value
-    if (!token) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-    }
-
-    const decoded = authService.verifyToken(token)
+    // Rate limiting: 30 requests per 10 minutes per IP
+    enforceRateLimit(request, { limit: 30, windowMs: 10 * 60 * 1000 })
+    
+    const { userId } = getAuthUser(request)
     const { id: conversationId } = await params
-    const { searchParams } = new URL(request.url)
-    const format = searchParams.get('format') || 'markdown'
+    const format = readQueryParam(request, 'format') || 'markdown'
+    
+    // Validate conversation ID format
+    schemas.uuid.parse(conversationId)
+
+    // Validate format
+    if (!['markdown', 'pdf'].includes(format)) {
+      throw new Error('Invalid format. Must be markdown or pdf')
+    }
 
     // Get conversation
     const { data: conversation, error } = await supabaseAdmin
       .from('conversations')
       .select('*')
       .eq('id', conversationId)
-      .eq('user_id', decoded.userId)
+      .eq('user_id', userId)
       .single()
 
     if (error || !conversation) {
-      return NextResponse.json({ error: 'Conversation not found' }, { status: 404 })
+      throw new Error('Conversation not found')
     }
 
     if (!conversation.generated_prd) {
-      return NextResponse.json({ error: 'No PRD generated yet' }, { status: 400 })
+      throw new Error('No PRD generated yet')
     }
 
     if (format === 'pdf') {
       // Generate proper PDF with markdown parsing
       const pdfBuffer = await generatePDF(conversation.generated_prd, conversation.project_name || 'PRD')
       
-      return new NextResponse(pdfBuffer as any, {
+      Logger.info('PDF exported successfully', {
+        requestId,
+        route,
+        userId,
+        conversationId,
+        format: 'pdf',
+        projectName: conversation.project_name,
+        durationMs: Date.now() - startTime
+      })
+
+      const response = new NextResponse(pdfBuffer as any, {
         headers: {
           'Content-Type': 'application/pdf',
-          'Content-Disposition': `attachment; filename="${conversation.project_name || 'PRD'}.pdf"`
+          'Content-Disposition': `attachment; filename="${conversation.project_name || 'PRD'}.pdf"`,
+          'x-request-id': requestId
         }
       })
+      return addRequestIdHeader(response, requestId)
     }
 
     // Return markdown file
     const markdown = conversation.generated_prd
     const filename = `${conversation.project_name || 'PRD'}.md`
 
-    return new NextResponse(markdown, {
+    Logger.info('Markdown exported successfully', {
+      requestId,
+      route,
+      userId,
+      conversationId,
+      format: 'markdown',
+      projectName: conversation.project_name,
+      durationMs: Date.now() - startTime
+    })
+
+    const response = new NextResponse(markdown, {
       headers: {
         'Content-Type': 'text/markdown',
         'Content-Disposition': `attachment; filename="${filename}"`
       }
     })
+    return addRequestIdHeader(response, requestId)
+    
   } catch (error) {
-    console.error('Export error:', error)
-    return NextResponse.json(
-      { error: 'Failed to export PRD' },
-      { status: 500 }
-    )
+    Logger.error('Failed to export conversation', error, { requestId, route })
+    return addRequestIdHeader(toErrorResponse(error, requestId), requestId)
   }
 }
 

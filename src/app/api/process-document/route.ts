@@ -2,21 +2,24 @@ import { NextRequest, NextResponse } from 'next/server'
 import { documentProcessor } from '@/lib/documentProcessor'
 import { qwen3Service } from '@/lib/huggingface'
 import { supabaseAdmin } from '@/lib/supabase'
-import { authService } from '@/lib/auth'
+import { getAuthUser } from '@/lib/api/auth-guard'
+import { validateBody, schemas } from '@/lib/api/validate'
+import { createRequestId, parseJson, addRequestIdHeader } from '@/lib/api/request'
+import { toErrorResponse } from '@/lib/api/errors'
+import { Logger } from '@/lib/api/logger'
+import { enforceRateLimit } from '@/lib/api/rate-limit'
 
 export async function POST(request: NextRequest) {
+  const requestId = createRequestId()
+  const startTime = Date.now()
+  const route = '/api/process-document'
+  
   try {
-    const token = request.cookies.get('auth-token')?.value
-    if (!token) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-    }
-
-    const decoded = authService.verifyToken(token)
-    const { fileId } = await request.json()
-
-    if (!fileId) {
-      return NextResponse.json({ error: 'Missing file ID' }, { status: 400 })
-    }
+    // Rate limiting: 20 requests per 10 minutes per IP
+    enforceRateLimit(request, { limit: 20, windowMs: 10 * 60 * 1000 })
+    
+    const { userId } = getAuthUser(request)
+    const { fileId } = validateBody(schemas.processDocument, await parseJson(request))
 
     // Process the document
     const processedDoc = await documentProcessor.processDocument(fileId)
@@ -34,7 +37,18 @@ export async function POST(request: NextRequest) {
       processedDoc.images
     )
 
-    return NextResponse.json({
+    Logger.info('Document processed successfully', {
+      requestId,
+      route,
+      userId,
+      fileId,
+      filename: fileData?.filename,
+      pageCount: processedDoc.pageCount,
+      textLength: processedDoc.text.length,
+      durationMs: Date.now() - startTime
+    })
+
+    const response = NextResponse.json({
       analysis,
       metadata: {
         filename: fileData?.filename,
@@ -43,24 +57,10 @@ export async function POST(request: NextRequest) {
         textLength: processedDoc.text.length
       }
     })
-  } catch (error: any) {
-    console.error('Document processing error:', error)
+    return addRequestIdHeader(response, requestId)
     
-    if (error.message?.includes('Password-protected')) {
-      return NextResponse.json({ error: error.message }, { status: 400 })
-    }
-    
-    if (error.message?.includes('corrupted')) {
-      return NextResponse.json({ error: 'File is corrupted or unreadable.' }, { status: 400 })
-    }
-    
-    if (error.message?.includes('limit')) {
-      return NextResponse.json({ error: error.message }, { status: 400 })
-    }
-
-    return NextResponse.json(
-      { error: 'Failed to process document' },
-      { status: 500 }
-    )
+  } catch (error) {
+    Logger.error('Failed to process document', error, { requestId, route })
+    return addRequestIdHeader(toErrorResponse(error, requestId), requestId)
   }
 }

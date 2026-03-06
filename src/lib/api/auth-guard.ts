@@ -3,16 +3,16 @@ import { authService } from '@/lib/auth'
 import { ApiError } from './errors'
 
 export function getAuthUser(request: NextRequest): { userId: string } {
-  const token = request.cookies.get('auth-token')?.value
+  const accessToken = request.cookies.get('access-token')?.value
   
-  if (!token) {
-    throw new ApiError(401, 'UNAUTHORIZED', 'Authentication token required')
+  if (!accessToken) {
+    throw new ApiError(401, 'UNAUTHORIZED', 'Access token required')
   }
 
   try {
-    const decoded = authService.verifyToken(token)
+    const decoded = authService.verifyAccessToken(accessToken)
     return { userId: decoded.userId }
   } catch (error) {
-    throw new ApiError(401, 'INVALID_TOKEN', 'Invalid or expired token')
+    throw new ApiError(401, 'INVALID_TOKEN', 'Invalid or expired access token')
   }
 }

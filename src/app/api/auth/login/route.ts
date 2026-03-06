@@ -28,13 +28,22 @@ export async function POST(request: NextRequest) {
     
     const response = NextResponse.json({ user }, { status: 200 })
     
-    // Hardened cookie settings
-    response.cookies.set('auth-token', user.token, {
+    // Set access token (15 minutes)
+    response.cookies.set('access-token', user.accessToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
       sameSite: 'lax',
       path: '/',
-      maxAge: 60 * 60 * 24 // 24 hours
+      maxAge: 15 * 60 // 15 minutes
+    })
+    
+    // Set refresh token (7 days)
+    response.cookies.set('refresh-token', user.refreshToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      path: '/',
+      maxAge: 7 * 24 * 60 * 60 // 7 days
     })
     
     return addRequestIdHeader(response, requestId)

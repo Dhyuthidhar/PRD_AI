@@ -1,59 +1,74 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { supabaseAdmin } from '@/lib/supabase'
-import { authService } from '@/lib/auth'
+import { getAuthUser } from '@/lib/api/auth-guard'
+import { validateBody, schemas } from '@/lib/api/validate'
+import { createRequestId, parseJson, addRequestIdHeader } from '@/lib/api/request'
+import { toErrorResponse } from '@/lib/api/errors'
+import { Logger } from '@/lib/api/logger'
 
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  const requestId = createRequestId()
+  const startTime = Date.now()
+  const route = '/api/conversations/[id]'
+  
   try {
-    const token = request.cookies.get('auth-token')?.value
-    if (!token) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-    }
-
-    const decoded = authService.verifyToken(token)
+    const { userId } = getAuthUser(request)
     const { id: conversationId } = await params
+    
+    // Validate conversation ID format
+    schemas.uuid.parse(conversationId)
 
     const { data: conversation, error } = await supabaseAdmin
       .from('conversations')
       .select('*')
       .eq('id', conversationId)
-      .eq('user_id', decoded.userId)
+      .eq('user_id', userId)
       .single()
 
     if (error || !conversation) {
-      return NextResponse.json({ error: 'Conversation not found' }, { status: 404 })
+      throw new Error('Conversation not found')
     }
 
-    return NextResponse.json({ conversation })
+    Logger.info('Conversation fetched', {
+      requestId,
+      route,
+      userId,
+      conversationId,
+      durationMs: Date.now() - startTime
+    })
+
+    const response = NextResponse.json({ conversation })
+    return addRequestIdHeader(response, requestId)
+    
   } catch (error) {
-    console.error('Get conversation error:', error)
-    return NextResponse.json(
-      { error: 'Failed to fetch conversation' },
-      { status: 500 }
-    )
+    Logger.error('Failed to fetch conversation', error, { requestId, route })
+    return addRequestIdHeader(toErrorResponse(error, requestId), requestId)
   }
 }
 
 export async function PUT(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  const requestId = createRequestId()
+  const startTime = Date.now()
+  const route = '/api/conversations/[id]'
+  
   try {
-    const token = request.cookies.get('auth-token')?.value
-    if (!token) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-    }
-
-    const decoded = authService.verifyToken(token)
+    const { userId } = getAuthUser(request)
     const { id: conversationId } = await params
-    const updates = await request.json()
+    const updates = validateBody(schemas.conversation.update, await parseJson(request))
+    
+    // Validate conversation ID format
+    schemas.uuid.parse(conversationId)
 
     // Verify conversation belongs to user
     const { data: conversation, error } = await supabaseAdmin
       .from('conversations')
       .select('*')
       .eq('id', conversationId)
-      .eq('user_id', decoded.userId)
+      .eq('user_id', userId)
       .single()
 
     if (error || !conversation) {
-      return NextResponse.json({ error: 'Conversation not found' }, { status: 404 })
+      throw new Error('Conversation not found')
     }
 
     const { data: updatedConversation, error: updateError } = await supabaseAdmin
@@ -70,12 +85,20 @@ export async function PUT(request: NextRequest, { params }: { params: Promise<{ 
       throw updateError
     }
 
-    return NextResponse.json({ conversation: updatedConversation })
+    Logger.info('Conversation updated', {
+      requestId,
+      route,
+      userId,
+      conversationId,
+      updates: Object.keys(updates),
+      durationMs: Date.now() - startTime
+    })
+
+    const response = NextResponse.json({ conversation: updatedConversation })
+    return addRequestIdHeader(response, requestId)
+    
   } catch (error) {
-    console.error('Update conversation error:', error)
-    return NextResponse.json(
-      { error: 'Failed to update conversation' },
-      { status: 500 }
-    )
+    Logger.error('Failed to update conversation', error, { requestId, route })
+    return addRequestIdHeader(toErrorResponse(error, requestId), requestId)
   }
 }
