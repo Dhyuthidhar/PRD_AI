@@ -5,6 +5,7 @@ import { createRequestId, parseJson, addRequestIdHeader } from '@/lib/api/reques
 import { toErrorResponse } from '@/lib/api/errors'
 import { Logger } from '@/lib/api/logger'
 import { enforceRateLimit } from '@/lib/api/rate-limit'
+import { isAllowedRegistrationEmail } from '@/lib/auth-domains'
 
 export async function POST(request: NextRequest) {
   const requestId = createRequestId()
@@ -16,6 +17,17 @@ export async function POST(request: NextRequest) {
     enforceRateLimit(request, { limit: 3, windowMs: 60 * 60 * 1000 })
     
     const { email, password, name, role } = validateBody(schemas.auth.register, await parseJson(request))
+    
+    // Additional domain validation logging (without logging password)
+    if (!isAllowedRegistrationEmail(email)) {
+      Logger.info('Registration attempt from disallowed domain', {
+        requestId,
+        route,
+        email: email.toLowerCase(),
+        domain: email.split('@')[1]?.toLowerCase()
+      })
+      throw new Error('Registration is only allowed for Surviant email domains.')
+    }
     
     const user = await authService.createUser({ email, password, name, role })
     

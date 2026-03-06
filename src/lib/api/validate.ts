@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { ApiError } from './errors'
+import { isAllowedRegistrationEmail } from '@/lib/auth-domains'
 
 export function validateBody<T>(schema: z.ZodSchema<T>, body: unknown): T {
   const result = schema.safeParse(body)
@@ -23,7 +24,12 @@ export const schemas = {
     }),
     
     register: z.object({
-      email: z.string().email('Invalid email format'),
+      email: z.string()
+        .min(1, 'Email is required')
+        .email('Invalid email format')
+        .refine((email) => isAllowedRegistrationEmail(email), {
+          message: 'Registration is only allowed for Surviant email domains.'
+        }),
       password: z.string().min(8, 'Password must be at least 8 characters'),
       name: z.string().min(1, 'Name is required').max(255, 'Name too long'),
       role: z.enum(['user', 'admin']).default('user')

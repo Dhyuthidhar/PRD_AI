@@ -3,7 +3,7 @@ import { HfInference } from '@huggingface/inference'
 const hf = process.env.HUGGINGFACE_API_KEY ? new HfInference(process.env.HUGGINGFACE_API_KEY) : null
 
 export interface ChatMessage {
-  role: 'user' | 'assistant'
+  role: 'user' | 'assistant' | 'system'
   content: string
   [key: string]: any
 }
@@ -28,11 +28,15 @@ export class Qwen3Service {
 
     try {
       console.log('Generating response with model:', this.model)
-      console.log('Messages:', messages)
+      console.log('Message count:', messages.length)
+      console.log('Has system message:', messages.some(m => m.role === 'system'))
+      
+      // Filter out system messages if model doesn't support them
+      const filteredMessages = this.filterMessagesForModel(messages)
       
       const response = await hf.chatCompletion({
         model: this.model,
-        messages: messages,
+        messages: filteredMessages,
         max_tokens: config.max_tokens || 2000,
         temperature: config.temperature || 0.7,
         top_p: config.top_p || 0.9,
@@ -46,10 +50,146 @@ export class Qwen3Service {
     }
   }
 
+  private filterMessagesForModel(messages: ChatMessage[]): ChatMessage[] {
+    // Qwen models support system messages, but keep as fallback
+    const modelSupportsSystem = this.model.includes('Qwen') || this.model.includes('qwen')
+    
+    if (modelSupportsSystem) {
+      return messages
+    }
+    
+    // For models that don't support system messages, convert to user message
+    return messages.map(msg => 
+      msg.role === 'system' 
+        ? { ...msg, role: 'user' as const, content: `SYSTEM: ${msg.content}` }
+        : msg
+    )
+  }
+
   private getFallbackResponse(messages: ChatMessage[]): string {
     const lastMessage = messages[messages.length - 1]?.content || ''
     
-    // Simple fallback responses based on keywords
+    // Extract system instructions if present
+    const systemMessage = messages.find(m => m.role === 'system')
+    const isPRDMode = systemMessage?.content?.includes('PRD Assistant') || 
+                     lastMessage.toLowerCase().includes('prd') ||
+                     lastMessage.toLowerCase().includes('requirements')
+    
+    // Extract document context if present
+    const documentContext = messages.find(m => 
+      m.role === 'user' && m.content.includes('UPLOADED DOCUMENTS CONTEXT')
+    )
+    
+    // Extract stage context if present
+    const stageContext = messages.find(m => 
+      m.role === 'user' && m.content.includes('CURRENT STAGE:')
+    )
+    
+    // Get recent conversation context (last 3 user messages)
+    const recentUserMessages = messages
+      .filter(m => m.role === 'user')
+      .slice(-3)
+      .map(m => m.content)
+    
+    const conversationContext = recentUserMessages.join(' ').toLowerCase()
+    
+    // If we're in PRD mode, provide guided responses
+    if (isPRDMode) {
+      return this.getPRDFallbackResponse(lastMessage, conversationContext, documentContext, stageContext)
+    }
+    
+    // Legacy fallback for non-PRD conversations
+    return this.getLegacyFallbackResponse(lastMessage)
+  }
+
+  private getPRDFallbackResponse(
+    lastMessage: string, 
+    conversationContext: string, 
+    documentContext: any, 
+    stageContext: any
+  ): string {
+    const hasDocContext = documentContext && documentContext.content.includes('DOCUMENTS AVAILABLE')
+    const currentStage = this.extractCurrentStage(stageContext)
+    
+    // Determine what information we're missing based on conversation
+    const missingInfo = this.detectMissingPRDInfo(conversationContext)
+    
+    // Reference documents if available
+    const docReference = hasDocContext 
+      ? "I notice you've uploaded documents. Let me reference those while we work through your requirements. "
+      : ""
+    
+    // Stage-specific guidance
+    if (currentStage === 'overview' && !conversationContext.includes('problem') && !conversationContext.includes('solve')) {
+      return `${docReference}Let's start with the fundamentals. What problem does your project solve, and what makes it different from existing solutions?`
+    }
+    
+    if (currentStage === 'target_users' && !conversationContext.includes('user') && !conversationContext.includes('audience')) {
+      return `${docReference}Now let's focus on who will use this. Can you describe your target users and their key characteristics?`
+    }
+    
+    if (currentStage === 'features' && !conversationContext.includes('feature') && !conversationContext.includes('function')) {
+      return `${docReference}Let's explore the core functionality. What are the main features your users need to accomplish their goals?`
+    }
+    
+    if (missingInfo.length > 0) {
+      return `${docReference}I notice we haven't covered ${missingInfo.join(', ')} yet. Could you tell me more about ${missingInfo[0]}?`
+    }
+    
+    // Contextual responses based on current message
+    if (lastMessage.toLowerCase().includes('mobile app')) {
+      return `${docReference}Great! For a mobile application, I'd like to understand: What platform(s) are you targeting, what's the core user journey, and how will this app stand out in the app store?`
+    }
+    
+    if (lastMessage.toLowerCase().includes('website') || lastMessage.toLowerCase().includes('web app')) {
+      return `${docReference}Excellent! For your web application, let's clarify: Who are the primary users, what actions can they perform, and what makes your approach unique?`
+    }
+    
+    // Default PRD-focused response
+    return `${docReference}I'm helping you build a comprehensive PRD. Based on what we've discussed, what aspect would you like to explore next - user needs, technical requirements, or success metrics?`
+  }
+
+  private extractCurrentStage(stageContext: any): string {
+    if (!stageContext || !stageContext.content) return 'overview'
+    
+    const content = stageContext.content
+    if (content.includes('target_users')) return 'target_users'
+    if (content.includes('features')) return 'features'
+    if (content.includes('technical_requirements')) return 'technical_requirements'
+    if (content.includes('ui_ux_requirements')) return 'ui_ux_requirements'
+    if (content.includes('complete')) return 'complete'
+    
+    return 'overview'
+  }
+
+  private detectMissingPRDInfo(conversationContext: string): string[] {
+    const missing = []
+    
+    if (!conversationContext.includes('problem') && !conversationContext.includes('solve')) {
+      missing.push('the problem you\'re solving')
+    }
+    
+    if (!conversationContext.includes('user') && !conversationContext.includes('audience')) {
+      missing.push('target users')
+    }
+    
+    if (!conversationContext.includes('feature') && !conversationContext.includes('function')) {
+      missing.push('key features')
+    }
+    
+    if (!conversationContext.includes('technical') && !conversationContext.includes('platform')) {
+      missing.push('technical requirements')
+    }
+    
+    if (!conversationContext.includes('metric') && !conversationContext.includes('success')) {
+      missing.push('success metrics')
+    }
+    
+    return missing.slice(0, 2) // Return max 2 missing items
+  }
+
+  private getLegacyFallbackResponse(lastMessage: string): string {
+    // Keep the original fallback for non-PRD conversations
     if (lastMessage.toLowerCase().includes('hello') || lastMessage.toLowerCase().includes('hi')) {
       return "Hello! I'm here to help you create a Product Requirements Document. What kind of project are you working on?"
     }
@@ -70,7 +210,6 @@ export class Qwen3Service {
       return "Understanding your users is crucial! Can you describe your target audience? Are they internal employees, external customers, or a specific demographic?"
     }
     
-    // Default fallback
     return "I understand you're working on a project. To help create a comprehensive PRD, could you tell me more about: 1) What you're building, 2) Who will use it, and 3) What problem it solves?"
   }
 

@@ -7,6 +7,9 @@ import { createRequestId, parseJson, addRequestIdHeader } from '@/lib/api/reques
 import { toErrorResponse } from '@/lib/api/errors'
 import { Logger } from '@/lib/api/logger'
 import { enforceRateLimit } from '@/lib/api/rate-limit'
+import { PromptBuilder, PromptBuilderContext } from '@/lib/promptBuilder'
+import { DocumentContextService } from '@/lib/documentContext'
+import { ConversationStateService } from '@/lib/conversationState'
 
 export async function POST(request: NextRequest) {
   const requestId = createRequestId()
@@ -32,16 +35,41 @@ export async function POST(request: NextRequest) {
       throw new Error('Conversation not found')
     }
 
-    // Build message history for AI context
-    const messages: ChatMessage[] = conversation.messages.map((msg: any) => ({
-      role: msg.role,
-      content: msg.content
-    }))
+    // Get document context
+    const documentContext = await DocumentContextService.getDocumentContext(conversationId)
 
-    // Add current user message
-    messages.push({
-      role: 'user',
-      content: message
+    // Get conversation flow state
+    const flowState = ConversationStateService.getStateFromMessages(conversation.messages)
+
+    // Build enhanced prompt using PromptBuilder
+    const promptContext: PromptBuilderContext = {
+      conversation: {
+        id: conversation.id,
+        messages: conversation.messages,
+        generated_prd: conversation.generated_prd
+      },
+      currentMessage: message,
+      documentContext: documentContext,
+      flowState: flowState
+    }
+
+    const messages = PromptBuilder.buildChatPrompt(promptContext)
+    const promptStats = PromptBuilder.getPromptStats(promptContext)
+
+    // Log request details
+    Logger.info('Chat request built', {
+      requestId,
+      route,
+      userId,
+      conversationId,
+      messageCount: promptStats.messageCount,
+      estimatedTokens: promptStats.estimatedTokens,
+      hasSystemPrompt: promptStats.hasSystemPrompt,
+      hasDocumentContext: promptStats.hasDocumentContext,
+      hasStageContext: promptStats.hasStageContext,
+      historyMessageCount: promptStats.historyMessageCount,
+      currentStage: ConversationStateService.getCurrentStageName(flowState),
+      progressPercentage: ConversationStateService.getProgressPercentage(flowState)
     })
 
     // Generate AI response
@@ -57,7 +85,8 @@ export async function POST(request: NextRequest) {
       conversationId,
       messageLength: message.length,
       responseLength: response.length,
-      durationMs: Date.now() - startTime
+      durationMs: Date.now() - startTime,
+      tokensUsed: promptStats.estimatedTokens
     })
 
     const responseData = NextResponse.json({ response })

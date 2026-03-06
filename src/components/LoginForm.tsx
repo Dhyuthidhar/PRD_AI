@@ -33,6 +33,7 @@ export default function LoginForm() {
         headers: {
           'Content-Type': 'application/json'
         },
+        credentials: 'include', // Important: Include cookies
         body: JSON.stringify(formData)
       })
 
@@ -42,6 +43,12 @@ export default function LoginForm() {
         throw new Error(data.error || 'Login failed')
       }
 
+      console.log('Login successful, response headers:', response.headers)
+      console.log('Login successful, response data:', data)
+      
+      // Check if cookies were set
+      console.log('Current cookies after login:', document.cookie)
+      
       router.push('/dashboard')
     } catch (error: any) {
       setError(error.message)

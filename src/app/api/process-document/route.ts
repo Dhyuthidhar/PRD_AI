@@ -37,6 +37,34 @@ export async function POST(request: NextRequest) {
       processedDoc.images
     )
 
+    // Save analysis to database
+    let analysisPersisted = false
+    const { data: updatedFile, error: updateError } = await supabaseAdmin
+      .from('uploaded_files')
+      .update({
+        analysis: analysis,
+        processed_at: new Date().toISOString()
+      })
+      .eq('id', fileId)
+      .select()
+      .single()
+
+    if (updateError) {
+      // Check if it's a column missing error
+      if (updateError.message?.includes('column') || updateError.code === '42703') {
+        Logger.info('Document analysis column not found - analysis not persisted', {
+          requestId,
+          route,
+          fileId,
+          error: updateError.message
+        })
+      } else {
+        Logger.error('Failed to save document analysis', updateError, { requestId, route, fileId })
+      }
+    } else {
+      analysisPersisted = true
+    }
+
     Logger.info('Document processed successfully', {
       requestId,
       route,
@@ -45,6 +73,7 @@ export async function POST(request: NextRequest) {
       filename: fileData?.filename,
       pageCount: processedDoc.pageCount,
       textLength: processedDoc.text.length,
+      analysisPersisted,
       durationMs: Date.now() - startTime
     })
 

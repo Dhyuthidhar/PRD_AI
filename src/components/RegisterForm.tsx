@@ -2,6 +2,7 @@
 
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { isAllowedRegistrationEmail, getAllowedDomainsText } from '@/lib/auth-domains'
 
 export default function RegisterForm() {
   const [formData, setFormData] = useState({
@@ -12,10 +13,29 @@ export default function RegisterForm() {
   })
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState('')
+  const [emailError, setEmailError] = useState('')
   const router = useRouter()
 
+  const validateEmailDomain = (email: string) => {
+    if (!email) {
+      setEmailError('')
+      return
+    }
+    
+    if (!isAllowedRegistrationEmail(email)) {
+      setEmailError('Registration is only allowed for Surviant email domains.')
+    } else {
+      setEmailError('')
+    }
+  }
+
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setFormData(prev => ({ ...prev, [e.target.name]: e.target.value }))
+    const { name, value } = e.target
+    setFormData(prev => ({ ...prev, [name]: value }))
+    
+    if (name === 'email') {
+      validateEmailDomain(value)
+    }
   }
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -23,8 +43,15 @@ export default function RegisterForm() {
     setIsLoading(true)
     setError('')
 
+    // Client-side validation
     if (formData.password !== formData.confirmPassword) {
       setError('Passwords do not match')
+      setIsLoading(false)
+      return
+    }
+
+    if (!isAllowedRegistrationEmail(formData.email)) {
+      setError('Registration is only allowed for Surviant email domains.')
       setIsLoading(false)
       return
     }
@@ -80,15 +107,25 @@ export default function RegisterForm() {
               className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-indigo-500 text-gray-900 placeholder-gray-500"
             />
             
-            <input
-              name="email"
-              type="email"
-              required
-              placeholder="Email"
-              value={formData.email}
-              onChange={handleChange}
-              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-indigo-500 text-gray-900 placeholder-gray-500"
-            />
+            <div className="relative">
+              <input
+                name="email"
+                type="email"
+                required
+                placeholder="Email"
+                value={formData.email}
+                onChange={handleChange}
+                className={`w-full px-3 py-2 border rounded-md focus:outline-none focus:ring-indigo-500 text-gray-900 placeholder-gray-500 ${
+                  emailError ? 'border-red-300' : 'border-gray-300'
+                }`}
+              />
+              {emailError && (
+                <p className="mt-1 text-sm text-red-600">{emailError}</p>
+              )}
+              <p className="mt-1 text-xs text-gray-500">
+                Use your {getAllowedDomainsText()} email
+              </p>
+            </div>
             
             <input
               name="password"

@@ -2,7 +2,6 @@
 
 import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
-import { authClient, User } from '@/lib/auth-client'
 
 interface Conversation {
   id: string
@@ -15,90 +14,81 @@ interface Conversation {
 export default function Dashboard() {
   const [conversations, setConversations] = useState<Conversation[]>([])
   const [isLoading, setIsLoading] = useState(true)
-  const [user, setUser] = useState<User | null>(null)
-  const [searchQuery, setSearchQuery] = useState('')
-  const [statusFilter, setStatusFilter] = useState<string>('all')
-  const [isSearching, setIsSearching] = useState(false)
+  const [user, setUser] = useState<any>(null)
   const router = useRouter()
 
   useEffect(() => {
-    // Check if user is authenticated
-    if (!authClient.isAuthenticated()) {
-      router.push('/login')
-      return
+    // Simple auth check - make a test API call to verify auth
+    const checkAuth = async () => {
+      try {
+        console.log('Checking authentication...')
+        const response = await fetch('/api/auth/me', {
+          credentials: 'include'
+        })
+        console.log('Auth check response:', response.status)
+        
+        if (response.ok) {
+          // User is authenticated
+          fetchConversations()
+          fetchUser()
+        } else {
+          console.log('Auth failed, redirecting to login')
+          router.push('/login')
+        }
+      } catch (error) {
+        console.error('Auth check failed:', error)
+        router.push('/login')
+      } finally {
+        setIsLoading(false)
+      }
     }
 
-    fetchConversations()
-    fetchUser()
+    checkAuth()
   }, [])
 
   const fetchConversations = async () => {
     try {
-      const response = await authClient.fetchWithAuth('/api/conversations')
+      console.log('Fetching conversations...')
+      const response = await fetch('/api/conversations', {
+        credentials: 'include'
+      })
+      console.log('Conversations response:', response.status)
       if (response.ok) {
         const data = await response.json()
         setConversations(data.conversations || [])
       }
     } catch (error) {
       console.error('Failed to fetch conversations:', error)
-      // If authentication fails, redirect to login
-      if (error instanceof Error && error.message === 'Authentication failed') {
-        return
-      }
-    } finally {
-      setIsLoading(false)
     }
   }
 
   const fetchUser = async () => {
     try {
-      const userData = await authClient.getCurrentUser()
-      setUser(userData)
+      console.log('Fetching user...')
+      const response = await fetch('/api/auth/me', {
+        credentials: 'include'
+      })
+      console.log('User response:', response.status)
+      if (response.ok) {
+        const data = await response.json()
+        setUser(data.user)
+      }
     } catch (error) {
       console.error('Failed to fetch user:', error)
-      // If authentication fails, authClient will redirect to login
     }
   }
 
   const handleLogout = async () => {
-    await authClient.logout()
-  }
-
-  const handleSearch = async () => {
-    if (!searchQuery.trim()) {
-      fetchConversations()
-      return
-    }
-
-    setIsSearching(true)
     try {
-      const params = new URLSearchParams({
-        q: searchQuery,
-        ...(statusFilter !== 'all' && { status: statusFilter })
+      await fetch('/api/auth/logout', {
+        method: 'POST',
+        credentials: 'include'
       })
-      
-      const response = await authClient.fetchWithAuth(`/api/conversations/search?${params}`)
-      if (response.ok) {
-        const data = await response.json()
-        setConversations(data.conversations || [])
-      }
+      router.push('/login')
     } catch (error) {
-      console.error('Search failed:', error)
-    } finally {
-      setIsSearching(false)
+      console.error('Logout error:', error)
+      router.push('/login')
     }
-  }
-
-  const handleNewConversation = () => {
-    router.push('/conversation/new')
-  }
-
-  const handleConversationClick = (id: string) => {
-    router.push(`/conversation/${id}`)
-  }
-
-  const formatDate = (dateString: string) => {
-    return new Date(dateString).toLocaleDateString()
   }
 
   if (isLoading && !user) {
@@ -135,46 +125,6 @@ export default function Dashboard() {
 
       {/* Main Content */}
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {/* Search and Filters */}
-        <div className="bg-white rounded-lg shadow-sm p-6 mb-6">
-          <div className="flex flex-col sm:flex-row gap-4">
-            <div className="flex-1">
-              <input
-                type="text"
-                placeholder="Search conversations..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                onKeyPress={(e) => e.key === 'Enter' && handleSearch()}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              />
-            </div>
-            <div className="flex gap-2">
-              <select
-                value={statusFilter}
-                onChange={(e) => setStatusFilter(e.target.value)}
-                className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              >
-                <option value="all">All Status</option>
-                <option value="in_progress">In Progress</option>
-                <option value="completed">Completed</option>
-              </select>
-              <button
-                onClick={handleSearch}
-                disabled={isSearching}
-                className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
-              >
-                {isSearching ? 'Searching...' : 'Search'}
-              </button>
-              <button
-                onClick={handleNewConversation}
-                className="px-6 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700"
-              >
-                New Conversation
-              </button>
-            </div>
-          </div>
-        </div>
-
         {/* Conversations List */}
         <div className="bg-white rounded-lg shadow-sm">
           <div className="px-6 py-4 border-b">
@@ -189,7 +139,7 @@ export default function Dashboard() {
             <div className="px-6 py-8 text-center text-gray-500">
               <p className="mb-4">No conversations found</p>
               <button
-                onClick={handleNewConversation}
+                onClick={() => router.push('/conversation/new')}
                 className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
               >
                 Create your first conversation
@@ -200,7 +150,7 @@ export default function Dashboard() {
               {conversations.map((conversation) => (
                 <div
                   key={conversation.id}
-                  onClick={() => handleConversationClick(conversation.id)}
+                  onClick={() => router.push(`/conversation/${conversation.id}`)}
                   className="px-6 py-4 hover:bg-gray-50 cursor-pointer transition-colors"
                 >
                   <div className="flex justify-between items-start">
@@ -209,8 +159,8 @@ export default function Dashboard() {
                         {conversation.project_name}
                       </h3>
                       <div className="flex items-center gap-4 text-sm text-gray-500">
-                        <span>Created: {formatDate(conversation.created_at)}</span>
-                        <span>Modified: {formatDate(conversation.last_modified)}</span>
+                        <span>Created: {new Date(conversation.created_at).toLocaleDateString()}</span>
+                        <span>Modified: {new Date(conversation.last_modified).toLocaleDateString()}</span>
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
