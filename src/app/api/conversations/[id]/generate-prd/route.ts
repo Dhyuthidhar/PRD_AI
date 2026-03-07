@@ -7,6 +7,8 @@ import { toErrorResponse } from '@/lib/api/errors'
 import { Logger } from '@/lib/api/logger'
 import { enforceRateLimit } from '@/lib/api/rate-limit'
 import { schemas } from '@/lib/api/validate'
+import { ReadinessEvaluator } from '@/lib/readinessEvaluator'
+import { ConversationStateService } from '@/lib/conversationState'
 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const requestId = createRequestId()
@@ -34,6 +36,35 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     if (error || !conversation) {
       throw new Error('Conversation not found')
     }
+
+    // Evaluate readiness before allowing PRD generation
+    const flowState = ConversationStateService.getStateFromMessages(conversation.messages)
+    const readinessScore = ReadinessEvaluator.evaluateReadiness(conversation.messages, flowState)
+
+    if (!readinessScore.isReady) {
+      const status = ReadinessEvaluator.getReadinessStatus(readinessScore)
+      return NextResponse.json({
+        error: 'Insufficient information for PRD generation',
+        message: `Please continue the discovery phase. ${status.message}`,
+        readinessScore: readinessScore.overall,
+        missingCritical: readinessScore.missingCritical,
+        nextFocus: readinessScore.nextFocus,
+        suggestions: [
+          `Focus on: ${readinessScore.nextFocus}`,
+          `Missing critical information: ${readinessScore.missingCritical.join(', ')}`,
+          'Continue gathering requirements before generating PRD'
+        ]
+      }, { status: 400 })
+    }
+
+    Logger.info('PRD generation readiness check passed', {
+      requestId,
+      route,
+      userId,
+      conversationId,
+      readinessScore: readinessScore.overall,
+      missingCritical: readinessScore.missingCritical.length
+    })
 
     // Extract conversation content for PRD generation
     const conversationText = conversation.messages

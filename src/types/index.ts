@@ -15,6 +15,8 @@ export interface Conversation {
   last_modified: string
   messages: Message[]
   generated_prd?: string
+  current_stage: number
+  stage_data: Record<string, number>
 }
 
 export interface Message {

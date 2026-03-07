@@ -1,6 +1,7 @@
 import { ChatMessage } from './huggingface'
 import { conversationFlowManager, ConversationState } from './conversationFlow'
 import { ConversationStateService } from './conversationState'
+import { ReadinessEvaluator } from './readinessEvaluator'
 
 export interface PromptBuilderContext {
   conversation: {
@@ -11,6 +12,7 @@ export interface PromptBuilderContext {
   currentMessage: string
   documentContext?: DocumentContext[]
   flowState?: ConversationState
+  readinessScore?: import('./readinessEvaluator').ReadinessScore
 }
 
 export interface DocumentContext {
@@ -21,30 +23,48 @@ export interface DocumentContext {
 }
 
 export class PromptBuilder {
-  private static readonly SYSTEM_PROMPT = `You are an expert Product Requirements Document (PRD) Assistant. Your role is to help users create comprehensive, well-structured PRDs through guided conversation.
+  private static readonly SYSTEM_PROMPT = `You are an expert Product Requirements Document (PRD) Assistant. Your role is to guide users through a structured requirement discovery process BEFORE drafting any PRD.
+
+CRITICAL RULE: DO NOT generate PRD content until sufficient information is gathered. Your primary role is DISCOVERY, not drafting.
+
+DISCOVERY-FIRST APPROACH:
+1. ALWAYS start by understanding the problem and context
+2. Ask targeted questions to fill gaps systematically  
+3. NEVER jump to PRD drafting or feature lists prematurely
+4. Focus on ONE high-value question at a time
+5. Build understanding progressively through conversation
 
 RESPONSIBILITIES:
-1. Gather requirements systematically using a structured approach
-2. Ask clarifying questions when information is incomplete or vague
-3. Analyze uploaded documents and extract key insights
-4. Guide users through all essential PRD sections
-5. Maintain professional, business-focused communication
-6. Avoid generic answers - be specific and actionable
+- Gather requirements through guided conversation
+- Identify missing critical information
+- Ask clarifying questions when information is incomplete
+- Analyze uploaded documents for insights
+- Maintain professional, business-focused communication
+- Keep responses concise and conversational
 
-CONVERSATION APPROACH:
-- Start with project overview and business goals
-- Progress through target users, features, technical requirements, and UI/UX
-- Ask follow-up questions to fill gaps
-- Reference uploaded documents when relevant
-- Keep responses concise but informative
-- Focus on business value and user needs
+REQUIRED CATEGORIES TO EXPLORE:
+- Problem statement and business context
+- Target users and their needs
+- User workflows and journeys
+- Key features and functionality
+- Business objectives and success metrics
+- Technical constraints and platform requirements
 
 RESPONSE GUIDELINES:
+- If information is incomplete, ASK the best next question
+- NEVER provide a full PRD draft unless readiness is confirmed
+- Reference uploaded documents when relevant to discovery
+- Keep responses focused on gathering, not drafting
+- Suggest next discovery steps, not PRD sections
 - Be conversational but professional
-- Ask one focused question at a time
-- Reference previous context when relevant
-- Suggest next steps when appropriate
-- Avoid template-like responses`
+
+BEHAVIOR RULES:
+- Early conversation: Focus on understanding, not solutions
+- Mid conversation: Deep dive into specific missing areas
+- Late conversation: Confirm understanding before offering to draft
+- After PRD generated: Shift to refinement and improvement
+
+REMEMBER: You are a product discovery expert, not a document generator. Guide first, draft later.`
 
   private static readonly MAX_HISTORY_MESSAGES = 10
   private static readonly CONTEXT_SUMMARY_LIMIT = 800
@@ -92,6 +112,7 @@ RESPONSE GUIDELINES:
   private static buildStagePrompt(context: PromptBuilderContext): string {
     const flowState = context.flowState || conversationFlowManager.getInitialState()
     const currentSection = conversationFlowManager.getCurrentSection(flowState)
+    const readiness = context.readinessScore
     
     if (!currentSection) {
       return `CURRENT STAGE: Requirements gathering complete. Ready for PRD generation.
@@ -110,15 +131,34 @@ Focus on refining requirements and preparing for PRD generation.`
     const gapsText = missingSections.length > 0 ? `\nMISSING INFORMATION:\n- ${missingSections.join('\n- ')}` : ''
     const progressText = `PROGRESS: ${Math.round(progress)}% complete`
 
+    // Add readiness information
+    let readinessText = ''
+    if (readiness) {
+      const status = ReadinessEvaluator.getReadinessStatus(readiness)
+      readinessText = `\nREADINESS STATUS: ${status.message.toUpperCase()}\nOVERALL SCORE: ${readiness.overall}/100`
+      
+      if (!readiness.isReady) {
+        readinessText += `\nCRITICAL MISSING: ${readiness.missingCritical.join(', ')}`
+        readinessText += `\nNEXT FOCUS: ${readiness.nextFocus.toUpperCase()}`
+      } else {
+        readinessText += `\n✅ READY FOR PRD DRAFT - Good foundation established`
+      }
+    }
+
+    const stageGuidance = readiness && !readiness.isReady 
+      ? `CRITICAL: Ask focused questions about ${readiness.nextFocus} before considering PRD drafting.`
+      : `Ask specific questions to complete this section before moving to the next stage.`
+
     return `CURRENT STAGE: Gathering ${currentSection.name.replace('_', ' ').toUpperCase()} requirements
 
 ${progressText}
 SECTION STATUS: ${currentSection.status}
 ${gapsText}
+${readinessText}
 
 NEXT FOCUS: ${nextFocus}
 
-Ask specific questions to complete this section before moving to the next stage.`
+${stageGuidance}`
   }
 
   private static buildDocumentContext(documentContext?: DocumentContext[]): string {

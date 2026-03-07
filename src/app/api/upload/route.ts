@@ -7,6 +7,7 @@ import { toErrorResponse } from '@/lib/api/errors'
 import { Logger } from '@/lib/api/logger'
 import { enforceRateLimit } from '@/lib/api/rate-limit'
 import { fileTypeFromBuffer } from 'file-type'
+import { VirusScanner } from '@/lib/virusScanner'
 
 export async function POST(request: NextRequest) {
   const requestId = createRequestId()
@@ -51,6 +52,20 @@ export async function POST(request: NextRequest) {
     
     if (!fileType || !['pdf', 'docx', 'png', 'jpg', 'jpeg'].includes(fileType.ext)) {
       throw new Error('Invalid file format')
+    }
+
+    // Virus scanning
+    const scanResult = await VirusScanner.scanBuffer(buffer, file.name)
+    if (!scanResult.isClean) {
+      Logger.info('File failed virus scan', {
+        requestId,
+        route,
+        userId,
+        filename: file.name,
+        threat: scanResult.threat,
+        error: scanResult.error
+      })
+      throw new Error(scanResult.threat ? `Security threat detected: ${scanResult.threat}` : 'File security scan failed')
     }
 
     // Generate unique storage path

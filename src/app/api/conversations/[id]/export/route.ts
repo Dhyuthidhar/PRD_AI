@@ -15,12 +15,12 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
   const route = '/api/conversations/[id]/export'
   
   try {
-    // Rate limiting: 30 requests per 10 minutes per IP
-    enforceRateLimit(request, { limit: 30, windowMs: 10 * 60 * 1000 })
-    
     const { userId } = getAuthUser(request)
     const { id: conversationId } = await params
     const format = readQueryParam(request, 'format') || 'markdown'
+    
+    // Rate limiting: 30 requests per 10 minutes per IP
+    enforceRateLimit(request, { limit: 30, windowMs: 10 * 60 * 1000 })
     
     // Validate conversation ID format
     schemas.uuid.parse(conversationId)

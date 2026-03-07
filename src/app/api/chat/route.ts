@@ -7,9 +7,9 @@ import { createRequestId, parseJson, addRequestIdHeader } from '@/lib/api/reques
 import { toErrorResponse } from '@/lib/api/errors'
 import { Logger } from '@/lib/api/logger'
 import { enforceRateLimit } from '@/lib/api/rate-limit'
-import { PromptBuilder, PromptBuilderContext } from '@/lib/promptBuilder'
-import { DocumentContextService } from '@/lib/documentContext'
-import { ConversationStateService } from '@/lib/conversationState'
+import { InputSanitizer } from '@/lib/inputSanitizer'
+import { detectPRDRequest, getStageSystemPrompt, getStageLabel, ConversationStage } from '@/lib/conversationStages'
+import { shouldAdvanceStage, incrementStageResponseCount, getBlockedMessage } from '@/lib/stageManager'
 
 export async function POST(request: NextRequest) {
   const requestId = createRequestId()
@@ -23,10 +23,18 @@ export async function POST(request: NextRequest) {
     const { userId } = getAuthUser(request)
     const { conversationId, message } = validateBody(schemas.chat, await parseJson(request))
 
-    // Get conversation history
+    // Validate and sanitize input
+    const validation = InputSanitizer.validateMessage(message)
+    if (!validation.isValid) {
+      throw new Error(validation.reason)
+    }
+    
+    const sanitizedMessage = InputSanitizer.sanitizeText(message)
+
+    // 1. Fetch conversation from DB — get current_stage and stage_data fields too
     const { data: conversation, error } = await supabaseAdmin
       .from('conversations')
-      .select('*')
+      .select('id, messages, current_stage, stage_data, project_name, status, generated_prd')
       .eq('id', conversationId)
       .eq('user_id', userId)
       .single()
@@ -35,48 +43,174 @@ export async function POST(request: NextRequest) {
       throw new Error('Conversation not found')
     }
 
-    // Get document context
-    const documentContext = await DocumentContextService.getDocumentContext(conversationId)
+    const currentStage = conversation.current_stage as ConversationStage
+    const stageData = conversation.stage_data as Record<string, number>
 
-    // Get conversation flow state
-    const flowState = ConversationStateService.getStateFromMessages(conversation.messages)
+    // Handle __INIT__ trigger for new conversations
+    if (sanitizedMessage === '__INIT__') {
+      // Use stage 0 system prompt without incrementing stage_data or advancing
+      const systemPrompt = getStageSystemPrompt(ConversationStage.ASSESS)
+      
+      const messages: ChatMessage[] = [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: 'Start the conversation' }
+      ]
 
-    // Build enhanced prompt using PromptBuilder
-    const promptContext: PromptBuilderContext = {
-      conversation: {
-        id: conversation.id,
-        messages: conversation.messages,
-        generated_prd: conversation.generated_prd
-      },
-      currentMessage: message,
-      documentContext: documentContext,
-      flowState: flowState
+      const response = await qwen3Service.generateResponse(messages, {
+        max_tokens: 2000,
+        temperature: 0.7
+      })
+
+      // Guard against empty response
+      if (!response || response.trim() === '') {
+        return NextResponse.json(
+          { 
+            error: 'AI service returned an empty response. Please try again.',
+            currentStage: 0,
+            stageName: getStageLabel(0),
+            stageProgress: 0
+          },
+          { status: 503 }
+        )
+      }
+
+      const responseData = NextResponse.json({ 
+        response,
+        currentStage: 0,
+        stageName: getStageLabel(0),
+        stageProgress: 0
+      })
+      return addRequestIdHeader(responseData, requestId)
     }
 
-    const messages = PromptBuilder.buildChatPrompt(promptContext)
-    const promptStats = PromptBuilder.getPromptStats(promptContext)
+    // 2. Check if message is a PRD generation request using detectPRDRequest()
+    if (detectPRDRequest(sanitizedMessage) && currentStage < ConversationStage.GENERATE) {
+      const blockedMessage = getBlockedMessage(currentStage)
+      
+      // Save user message and blocked response
+      const updatedMessages = [
+        ...conversation.messages,
+        {
+          id: Date.now().toString(),
+          role: 'user' as const,
+          content: sanitizedMessage,
+          timestamp: new Date().toISOString()
+        },
+        {
+          id: (Date.now() + 1).toString(),
+          role: 'assistant' as const,
+          content: blockedMessage,
+          timestamp: new Date().toISOString()
+        }
+      ]
 
-    // Log request details
-    Logger.info('Chat request built', {
-      requestId,
-      route,
-      userId,
-      conversationId,
-      messageCount: promptStats.messageCount,
-      estimatedTokens: promptStats.estimatedTokens,
-      hasSystemPrompt: promptStats.hasSystemPrompt,
-      hasDocumentContext: promptStats.hasDocumentContext,
-      hasStageContext: promptStats.hasStageContext,
-      historyMessageCount: promptStats.historyMessageCount,
-      currentStage: ConversationStateService.getCurrentStageName(flowState),
-      progressPercentage: ConversationStateService.getProgressPercentage(flowState)
-    })
+      // Update conversation with messages
+      await supabaseAdmin
+        .from('conversations')
+        .update({
+          messages: updatedMessages,
+          last_modified: new Date().toISOString()
+        })
+        .eq('id', conversationId)
 
-    // Generate AI response
+      const responseData = NextResponse.json({ 
+        response: blockedMessage,
+        currentStage,
+        stageName: getStageLabel(currentStage),
+        stageProgress: Math.round((currentStage / 7) * 100)
+      })
+      return addRequestIdHeader(responseData, requestId)
+    }
+
+    // 3. Increment stage response count for current stage
+    const updatedStageData = incrementStageResponseCount(stageData, currentStage)
+
+    // 4. Check if stage should advance
+    const advanceResult = shouldAdvanceStage(currentStage, conversation.messages, updatedStageData)
+    const newStage = advanceResult.advanced ? advanceResult.newStage : currentStage
+
+    // 5. Get system prompt for the NEW stage (after potential advancement)
+    const systemPrompt = getStageSystemPrompt(newStage)
+
+    // 6. Build message array for HuggingFace
+    const recentMessages = conversation.messages
+      .slice(-6) // Last 6 messages from history
+      .map((msg: any) => ({
+        role: msg.role as 'user' | 'assistant',
+        content: msg.content
+      }))
+
+    const messages: ChatMessage[] = [
+      { role: 'system', content: systemPrompt },
+      ...recentMessages,
+      { role: 'user', content: sanitizedMessage }
+    ]
+
+    // 7. Call HuggingFace with this message array
     const response = await qwen3Service.generateResponse(messages, {
       max_tokens: 2000,
       temperature: 0.7
     })
+
+    // Guard against empty response
+    if (!response || response.trim() === '') {
+      return NextResponse.json(
+        { 
+          error: 'AI service returned an empty response. Please try again.',
+          currentStage: currentStage,  // Return ORIGINAL stage, not newStage
+          stageName: getStageLabel(currentStage),
+          stageProgress: Math.round((currentStage / 7) * 100)
+        },
+        { status: 503 }
+      )
+    }
+
+    // 8. Save to DB in ONE update call
+    const finalMessages = [
+      ...conversation.messages,
+      {
+        id: Date.now().toString(),
+        role: 'user' as const,
+        content: sanitizedMessage,
+        timestamp: new Date().toISOString()
+      },
+      {
+        id: (Date.now() + 1).toString(),
+        role: 'assistant' as const,
+        content: response,
+        timestamp: new Date().toISOString()
+      }
+    ]
+
+    const { error: updateError } = await supabaseAdmin
+      .from('conversations')
+      .update({
+        messages: finalMessages,
+        current_stage: newStage,
+        stage_data: updatedStageData,
+        last_modified: new Date().toISOString(),
+      })
+      .eq('id', conversationId)
+      .eq('user_id', userId)
+
+    if (updateError) {
+      // Log the error with full context for debugging
+      console.error('[chat] DB update failed after AI response', {
+        conversationId,
+        userId,
+        newStage,
+        error: updateError.message,
+      })
+      // Return the AI response to user BUT signal stage save failed
+      // Frontend can still show the AI message — better than silent failure
+      return NextResponse.json({
+        response: response,
+        currentStage: currentStage,   // Return ORIGINAL stage — not advanced
+        stageName: getStageLabel(currentStage),
+        stageProgress: Math.round((currentStage / 7) * 100),
+        warning: 'Response received but progress may not have saved. If issues persist, refresh the page.'
+      })
+    }
 
     Logger.info('Chat response generated', {
       requestId,
@@ -86,10 +220,17 @@ export async function POST(request: NextRequest) {
       messageLength: message.length,
       responseLength: response.length,
       durationMs: Date.now() - startTime,
-      tokensUsed: promptStats.estimatedTokens
+      currentStage: newStage,
+      stageAdvanced: advanceResult.advanced
     })
 
-    const responseData = NextResponse.json({ response })
+    // 9. Return response
+    const responseData = NextResponse.json({ 
+      response,
+      currentStage: newStage,
+      stageName: getStageLabel(newStage),
+      stageProgress: Math.round((newStage / 7) * 100)
+    })
     return addRequestIdHeader(responseData, requestId)
     
   } catch (error) {

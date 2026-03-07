@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react'
 import { useRouter } from 'next/navigation'
+import { getStageLabel } from '@/lib/conversationStages'
 
 interface Message {
   id: string
@@ -24,6 +25,9 @@ export default function ConversationInterface({ conversationId }: { conversation
   const [isLoading, setIsLoading] = useState(false)
   const [isTyping, setIsTyping] = useState(false)
   const [isCreatingNew, setIsCreatingNew] = useState(false)
+  const [currentStage, setCurrentStage] = useState(0)
+  const [stageName, setStageName] = useState('Initial Assessment')
+  const [stageProgress, setStageProgress] = useState(0)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const router = useRouter()
@@ -51,6 +55,8 @@ export default function ConversationInterface({ conversationId }: { conversation
       if (response.ok) {
         const data = await response.json()
         setConversation(data.conversation)
+        // Initialize stage from conversation object
+        setCurrentStage(data.conversation.current_stage || 0)
       }
     } catch (error) {
       console.error('Failed to load conversation:', error)
@@ -80,19 +86,39 @@ export default function ConversationInterface({ conversationId }: { conversation
   }
 
   const sendInitialMessage = async (convId: string) => {
-    const initialMessage = {
-      id: Date.now().toString(),
-      role: 'assistant' as const,
-      content: "Hello! I'm your AI PRD Assistant. Do you have an existing PRD or brief document you'd like me to analyze, or would you like to start gathering requirements from scratch?",
-      timestamp: new Date().toISOString()
-    }
-
     try {
-      await fetch(`/api/conversations/${convId}/messages`, {
+      // Call /api/chat with __INIT__ trigger to get stage 0 ASSESS prompt response
+      const response = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(initialMessage)
+        body: JSON.stringify({
+          conversationId: convId,
+          message: '__INIT__'
+        })
       })
+
+      if (response.ok) {
+        const data = await response.json()
+        const aiMessage = {
+          id: Date.now().toString(),
+          role: 'assistant' as const,
+          content: data.response,
+          timestamp: new Date().toISOString()
+        }
+
+        // Save AI message
+        await fetch(`/api/conversations/${convId}/messages`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(aiMessage)
+        })
+
+        // Update conversation with AI message
+        setConversation(prev => prev ? {
+          ...prev,
+          messages: [...prev.messages, aiMessage]
+        } : null)
+      }
     } catch (error) {
       console.error('Failed to send initial message:', error)
     }
@@ -142,6 +168,19 @@ export default function ConversationInterface({ conversationId }: { conversation
           role: 'assistant' as const,
           content: data.response,
           timestamp: new Date().toISOString()
+        }
+
+        // Update stage state after each chat API response
+        if (data.currentStage !== undefined) {
+          setCurrentStage(data.currentStage)
+          setStageName(data.stageName)
+          setStageProgress(data.stageProgress)
+        }
+
+        // Show warning if stage save failed
+        if (data.warning) {
+          console.warn('Stage save warning:', data.warning)
+          // Could add a toast notification here in the future
         }
 
         // Add AI message
@@ -206,17 +245,68 @@ export default function ConversationInterface({ conversationId }: { conversation
 
         if (processResponse.ok) {
           const processData = await processResponse.json()
+          
+          // Add the document analysis as an assistant message
           const analysisMessage = {
             id: Date.now().toString(),
             role: 'assistant' as const,
-            content: processData.analysis,
+            content: `I've analyzed your document "${data.file.filename}". Here's what I found:\n\n${processData.analysis}`,
             timestamp: new Date().toISOString()
           }
 
+          // Save the analysis message first
+          await fetch(`/api/conversations/${conversation.id}/messages`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(analysisMessage)
+          })
+
+          // Update conversation with analysis
           setConversation(prev => prev ? {
             ...prev,
             messages: [...prev.messages, analysisMessage]
           } : null)
+
+          // Now trigger AI to ask follow-up questions based on the document
+          setIsTyping(true)
+          setTimeout(async () => {
+            try {
+              const followUpResponse = await fetch('/api/chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  conversationId: conversation.id,
+                  message: "Based on the document I just uploaded, what follow-up questions do you have to help me refine my requirements?"
+                })
+              })
+
+              if (followUpResponse.ok) {
+                const followUpData = await followUpResponse.json()
+                const followUpMessage = {
+                  id: (Date.now() + 1).toString(),
+                  role: 'assistant' as const,
+                  content: followUpData.response,
+                  timestamp: new Date().toISOString()
+                }
+
+                // Save the follow-up message
+                await fetch(`/api/conversations/${conversation.id}/messages`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify(followUpMessage)
+                })
+
+                setConversation(prev => prev ? {
+                  ...prev,
+                  messages: [...prev.messages, followUpMessage]
+                } : null)
+              }
+            } catch (error) {
+              console.error('Failed to get follow-up response:', error)
+            } finally {
+              setIsTyping(false)
+            }
+          }, 500)
         }
       }
     } catch (error) {
@@ -245,6 +335,49 @@ export default function ConversationInterface({ conversationId }: { conversation
           generated_prd: data.prd,
           status: 'completed'
         } : null)
+        
+        // Update stage to completion
+        setCurrentStage(7)
+        setStageName('PRD Ready')
+        setStageProgress(100)
+      } else {
+        // Handle readiness check failure
+        const errorData = await response.json()
+        if (response.status === 400 && errorData.missingCritical) {
+          // Show user what's missing instead of generic error
+          const errorMessage = `${errorData.message}\n\nMissing information:\n${errorData.missingCritical.map((item: string) => `• ${item}`).join('\n')}\n\nFocus on: ${errorData.nextFocus}`
+          
+          // Add AI message explaining what's needed
+          const guidanceMessage = {
+            id: Date.now().toString(),
+            role: 'assistant' as const,
+            content: `I need more information before generating a comprehensive PRD. Let me help you gather what's missing.
+
+${errorData.message}
+
+**What we still need to explore:**
+${errorData.missingCritical.map((item: string) => `• ${item}`).join('\n')}
+
+**Let's focus on:** ${errorData.nextFocus}
+
+Could you tell me more about ${errorData.nextFocus}?`,
+            timestamp: new Date().toISOString()
+          }
+
+          // Update stage from error response (if available)
+          if (errorData.currentStage !== undefined) {
+            setCurrentStage(errorData.currentStage)
+            setStageName(errorData.stageName || getStageLabel(errorData.currentStage))
+            setStageProgress(errorData.stageProgress || Math.round((errorData.currentStage / 7) * 100))
+          }
+
+          setConversation(prev => prev ? {
+            ...prev,
+            messages: [...prev.messages, guidanceMessage]
+          } : null)
+        } else {
+          console.error('Failed to generate PRD:', errorData)
+        }
       }
     } catch (error) {
       console.error('Failed to generate PRD:', error)
@@ -299,8 +432,13 @@ export default function ConversationInterface({ conversationId }: { conversation
             {conversation.status === 'in_progress' && (
               <button
                 onClick={generatePRD}
-                disabled={isLoading}
-                className="bg-indigo-600 text-white px-4 py-2 rounded-md hover:bg-indigo-700 disabled:opacity-50"
+                disabled={isLoading || currentStage < 7}
+                className={`px-4 py-2 rounded-md ${
+                  currentStage < 7
+                    ? 'bg-gray-400 text-gray-200 cursor-not-allowed' 
+                    : 'bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50'
+                }`}
+                title={currentStage < 7 ? `Complete all discovery stages first (${stageName} in progress)` : 'Generate PRD'}
               >
                 {isLoading ? 'Generating...' : 'Generate PRD'}
               </button>
@@ -330,6 +468,31 @@ export default function ConversationInterface({ conversationId }: { conversation
           </div>
         </div>
       </div>
+
+      {/* Stage Progress Indicator */}
+      {conversation.status === 'in_progress' && (
+        <div className="px-6 py-2">
+          <div className="border rounded-lg p-4 bg-gray-50">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="font-semibold">Discovery Progress</h3>
+              <span className="text-sm text-gray-600">{stageProgress}%</span>
+            </div>
+            <div className="w-full bg-gray-200 rounded-full h-2 mb-3">
+              <div 
+                className="bg-indigo-600 h-2 rounded-full transition-all duration-300"
+                style={{ width: `${stageProgress}%` }}
+              />
+            </div>
+            <div className="text-sm text-gray-700">
+              <span className="font-medium">Current Stage: </span>
+              <span>{stageName}</span>
+            </div>
+            <div className="text-xs text-gray-500 mt-2">
+              Assessment → Overview → Users → Features → Technical → UI/UX → Confirm → Ready
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Messages */}
       <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
