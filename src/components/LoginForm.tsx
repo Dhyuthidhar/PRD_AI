@@ -33,7 +33,7 @@ export default function LoginForm() {
         headers: {
           'Content-Type': 'application/json'
         },
-        credentials: 'include', // Important: Include cookies
+        credentials: 'include',
         body: JSON.stringify(formData)
       })
 
@@ -42,12 +42,6 @@ export default function LoginForm() {
       if (!response.ok) {
         throw new Error(data.error || 'Login failed')
       }
-
-      console.log('Login successful, response headers:', response.headers)
-      console.log('Login successful, response data:', data)
-      
-      // Check if cookies were set
-      console.log('Current cookies after login:', document.cookie)
       
       router.push('/dashboard')
     } catch (error: any) {
@@ -58,27 +52,37 @@ export default function LoginForm() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50">
-      <div className="max-w-md w-full space-y-8">
-        <div>
-          <h2 className="mt-6 text-center text-3xl font-extrabold text-gray-900">
-            Sign in to PRD Assistant
-          </h2>
-          <p className="mt-2 text-center text-sm text-gray-600">
+    <div className="min-h-screen flex items-center justify-center" style={{ background: 'linear-gradient(135deg, #1e2a4a 0%, #2a3f5f 100%)' }}>
+      <div className="w-full max-w-md">
+        {/* Logo/Title */}
+        <div className="text-center mb-8">
+          <div className="w-16 h-16 rounded-full bg-indigo-500 flex items-center justify-center mx-auto mb-4">
+            <span className="text-white text-2xl font-bold" style={{ fontFamily: 'var(--font-display)' }}>
+              PRD
+            </span>
+          </div>
+          <h1 className="text-2xl font-bold text-white mb-2" style={{ fontFamily: 'var(--font-display)' }}>
+            PRD Assistant
+          </h1>
+          <p className="text-white/80 text-sm">
             AI-powered requirements gathering tool
           </p>
         </div>
         
-        <form className="mt-8 space-y-6" onSubmit={handleSubmit}>
-          {error && (
-            <div className="bg-red-50 border border-red-200 text-red-600 px-4 py-3 rounded">
-              {error}
-            </div>
-          )}
-          
-          <div className="space-y-4">
+        {/* Login Card */}
+        <div className="bg-white rounded-xl shadow-2xl p-8">
+          <form onSubmit={handleSubmit} className="space-y-6">
+            {error && (
+              <div className="flex items-center p-4 border-l-4 border-red-500 bg-red-50" style={{ color: 'var(--color-danger)' }}>
+                <svg className="w-5 h-5 mr-2" fill="currentColor" viewBox="0 0 20 20">
+                  <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
+                </svg>
+                <span className="text-sm font-medium">{error}</span>
+              </div>
+            )}
+            
             <div>
-              <label htmlFor="email" className="block text-sm font-medium text-gray-700">
+              <label htmlFor="email" className="block text-sm font-medium mb-2" style={{ color: 'var(--color-text-primary)', fontFamily: 'var(--font-display)' }}>
                 Email address
               </label>
               <input
@@ -89,13 +93,13 @@ export default function LoginForm() {
                 required
                 value={formData.email}
                 onChange={handleChange}
-                className="mt-1 appearance-none relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 rounded-md focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
+                className="input-field w-full"
                 placeholder="Enter your email"
               />
             </div>
             
             <div>
-              <label htmlFor="password" className="block text-sm font-medium text-gray-700">
+              <label htmlFor="password" className="block text-sm font-medium mb-2" style={{ color: 'var(--color-text-primary)', fontFamily: 'var(--font-display)' }}>
                 Password
               </label>
               <input
@@ -106,34 +110,45 @@ export default function LoginForm() {
                 required
                 value={formData.password}
                 onChange={handleChange}
-                className="mt-1 appearance-none relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 rounded-md focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
+                className="input-field w-full"
                 placeholder="Enter your password"
               />
             </div>
-          </div>
 
-          <div>
-            <button
-              type="submit"
-              disabled={isLoading}
-              className="group relative w-full flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {isLoading ? 'Signing in...' : 'Sign in'}
-            </button>
-          </div>
-
-          <div className="text-center">
-            <p className="text-sm text-gray-600">
-              Don't have an account?{' '}
-              <a
-                href="/register"
-                className="font-medium text-indigo-600 hover:text-indigo-500"
-              >
-                Sign up
+            <div className="flex items-center justify-between text-sm">
+              <label className="flex items-center">
+                <input type="checkbox" className="mr-2 rounded border-gray-300" />
+                <span style={{ color: 'var(--color-text-secondary)' }}>Remember me</span>
+              </label>
+              <a href="#" className="hover:underline" style={{ color: 'var(--color-accent)' }}>
+                Forgot password?
               </a>
-            </p>
-          </div>
-        </form>
+            </div>
+
+            <div>
+              <button
+                type="submit"
+                disabled={isLoading}
+                className="button-primary w-full py-3 text-base"
+              >
+                {isLoading ? 'Signing in...' : 'Sign in'}
+              </button>
+            </div>
+
+            <div className="text-center">
+              <p className="text-sm" style={{ color: 'var(--color-text-secondary)' }}>
+                Don't have an account?{' '}
+                <a
+                  href="/register"
+                  className="font-medium hover:underline"
+                  style={{ color: 'var(--color-accent)' }}
+                >
+                  Sign up
+                </a>
+              </p>
+            </div>
+          </form>
+        </div>
       </div>
     </div>
   )

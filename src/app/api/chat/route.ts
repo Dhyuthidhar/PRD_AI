@@ -11,6 +11,67 @@ import { InputSanitizer } from '@/lib/inputSanitizer'
 import { detectPRDRequest, getStageSystemPrompt, getStageLabel, ConversationStage } from '@/lib/conversationStages'
 import { shouldAdvanceStage, incrementStageResponseCount, getBlockedMessage } from '@/lib/stageManager'
 
+const PRD_KEYWORDS = [
+  'product', 'feature', 'user', 'requirement', 'prd',
+  'app', 'system', 'build', 'platform', 'workflow',
+  'technical', 'design', 'ui', 'ux', 'integration',
+  'database', 'api', 'auth', 'performance', 'security',
+  'problem', 'solution', 'goal', 'objective', 'scope',
+  'yes', 'no', 'ok', 'sure', 'perfect', 'correct',
+  'that', 'this', 'it', 'sounds', 'good', 'great'
+]
+
+const OFFTOPIC_PATTERNS = [
+  /who is (the |)?president/i,
+  /what is (the |)?capital/i,
+  /who (is|was) [a-z]+ (born|died)/i,
+  /weather/i,
+  /stock price/i,
+  /sports/i,
+  /recipe/i,
+  /translate/i,
+  /what does .+ mean/i,
+  /who (won|lost)/i,
+  /tell me a joke/i,
+  /what is [0-9]+ (plus|minus|times)/i,
+]
+
+function isOffTopic(message: string): boolean {
+  const lower = message.toLowerCase().trim()
+  
+  // Short confirmations are never off-topic
+  if (lower.split(' ').length <= 3) return false
+  
+  // Check explicit off-topic patterns
+  if (OFFTOPIC_PATTERNS.some(p => p.test(lower))) return true
+  
+  // If message contains NO PRD-related keywords, it's off-topic
+  const hasPRDKeyword = PRD_KEYWORDS.some(k => lower.includes(k))
+  if (!hasPRDKeyword && lower.split(' ').length > 5) return true
+  
+  return false
+}
+
+async function saveMessage(conversationId: string, role: 'user' | 'assistant', content: string) {
+  const message = {
+    id: Date.now().toString(),
+    role,
+    content,
+    timestamp: new Date().toISOString()
+  }
+  
+  await supabaseAdmin
+    .from('conversations')
+    .update({
+      messages: supabaseAdmin.rpc('append_conversation_message', {
+        p_conversation_id: conversationId,
+        p_message: message
+      }),
+      last_modified: new Date().toISOString()
+    })
+    .eq('id', conversationId)
+}
+
 export async function POST(request: NextRequest) {
   const requestId = createRequestId()
   const startTime = Date.now()
@@ -122,17 +183,35 @@ export async function POST(request: NextRequest) {
       return addRequestIdHeader(responseData, requestId)
     }
 
-    // 3. Increment stage response count for current stage
+    // 3. Check for off-topic messages
+    if (isOffTopic(sanitizedMessage)) {
+      // Save user message to DB
+      await saveMessage(conversationId, 'user', sanitizedMessage)
+      
+      const redirectResponse = "I can only help with PRD creation. What aspect of your product would you like to discuss?"
+      
+      // Save AI redirect response to DB
+      await saveMessage(conversationId, 'assistant', redirectResponse)
+      
+      return NextResponse.json({
+        response: redirectResponse,
+        currentStage: currentStage,
+        stageName: getStageLabel(currentStage),
+        stageProgress: Math.round((currentStage / 7) * 100)
+      })
+    }
+
+    // 4. Increment stage response count for current stage
     const updatedStageData = incrementStageResponseCount(stageData, currentStage)
 
-    // 4. Check if stage should advance
+    // 5. Check if stage should advance
     const advanceResult = shouldAdvanceStage(currentStage, conversation.messages, updatedStageData)
     const newStage = advanceResult.advanced ? advanceResult.newStage : currentStage
 
-    // 5. Get system prompt for the NEW stage (after potential advancement)
+    // 6. Get system prompt for the NEW stage (after potential advancement)
     const systemPrompt = getStageSystemPrompt(newStage)
 
-    // 6. Build message array for HuggingFace
+    // 7. Build message array for HuggingFace
     const recentMessages = conversation.messages
       .slice(-6) // Last 6 messages from history
       .map((msg: any) => ({
@@ -146,7 +225,7 @@ export async function POST(request: NextRequest) {
       { role: 'user', content: sanitizedMessage }
     ]
 
-    // 7. Call HuggingFace with this message array
+    // 8. Call HuggingFace with this message array
     const response = await qwen3Service.generateResponse(messages, {
       max_tokens: 2000,
       temperature: 0.7

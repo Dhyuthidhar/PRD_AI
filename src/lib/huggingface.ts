@@ -31,12 +31,12 @@ export class Qwen3Service {
       console.log('Message count:', messages.length)
       console.log('Has system message:', messages.some(m => m.role === 'system'))
       
-      // Filter out system messages if model doesn't support them
-      const filteredMessages = this.filterMessagesForModel(messages)
+      // Format messages for Qwen using ChatML template
+      const formattedForQwen = this.formatForQwen(messages)
       
       const response = await hf.chatCompletion({
         model: this.model,
-        messages: filteredMessages,
+        messages: [{ role: 'user', content: formattedForQwen }],
         max_tokens: config.max_tokens || 2000,
         temperature: config.temperature || 0.7,
         top_p: config.top_p || 0.9,
@@ -48,6 +48,18 @@ export class Qwen3Service {
       // Return fallback response if API fails
       return this.getFallbackResponse(messages)
     }
+  }
+
+  private formatForQwen(messages: ChatMessage[]): string {
+    return messages.map(msg => {
+      if (msg.role === 'system') {
+        return `<|im_start|>system\n${msg.content}<|im_end|>` 
+      } else if (msg.role === 'user') {
+        return `<|im_start|>user\n${msg.content}<|im_end|>` 
+      } else {
+        return `<|im_start|>assistant\n${msg.content}<|im_end|>` 
+      }
+    }).join('\n') + '\n<|im_start|>assistant\n'
   }
 
   private filterMessagesForModel(messages: ChatMessage[]): ChatMessage[] {

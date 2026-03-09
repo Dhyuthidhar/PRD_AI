@@ -7,7 +7,7 @@ import { Logger } from '@/lib/api/logger'
 import { enforceRateLimit } from '@/lib/api/rate-limit'
 import { schemas } from '@/lib/api/validate'
 import { marked } from 'marked'
-import jsPDF from 'jspdf'
+import puppeteer from 'puppeteer'
 
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const requestId = createRequestId()
@@ -48,26 +48,52 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
 
     if (format === 'pdf') {
       // Generate proper PDF with markdown parsing
-      const pdfBuffer = await generatePDF(conversation.generated_prd, conversation.project_name || 'PRD')
+      const cleaned = removeSectionSummaries(conversation.generated_prd)
+      const dedupedContent = deduplicatePRDSections(cleaned)
+      const pdfBuffer = await generatePDF(dedupedContent, conversation.project_name || 'PRD')
       
-      Logger.info('PDF exported successfully', {
-        requestId,
-        route,
-        userId,
-        conversationId,
-        format: 'pdf',
-        projectName: conversation.project_name,
-        durationMs: Date.now() - startTime
-      })
+      // Check if we got a PDF or fallback markdown
+      const isPDF = pdfBuffer.length > 1000 && !pdfBuffer.toString('utf8', 0, 10).startsWith('# ')
+      
+      if (isPDF) {
+        Logger.info('PDF exported successfully', {
+          requestId,
+          route,
+          userId,
+          conversationId,
+          format: 'pdf',
+          projectName: conversation.project_name,
+          durationMs: Date.now() - startTime
+        })
 
-      const response = new NextResponse(pdfBuffer as any, {
-        headers: {
-          'Content-Type': 'application/pdf',
-          'Content-Disposition': `attachment; filename="${conversation.project_name || 'PRD'}.pdf"`,
-          'x-request-id': requestId
-        }
-      })
-      return addRequestIdHeader(response, requestId)
+        const response = new NextResponse(pdfBuffer as any, {
+          headers: {
+            'Content-Type': 'application/pdf',
+            'Content-Disposition': `attachment; filename="${conversation.project_name || 'PRD'}.pdf"`,
+            'x-request-id': requestId
+          }
+        })
+        return addRequestIdHeader(response, requestId)
+      } else {
+        // Fallback to markdown
+        Logger.error('PDF generation failed, returning markdown fallback', {
+          requestId,
+          route,
+          userId,
+          conversationId,
+          projectName: conversation.project_name,
+          durationMs: Date.now() - startTime
+        })
+
+        const response = new NextResponse(pdfBuffer.toString('utf8'), {
+          headers: {
+            'Content-Type': 'text/markdown',
+            'Content-Disposition': `attachment; filename="${conversation.project_name || 'PRD'}.md"`,
+            'x-request-id': requestId
+          }
+        })
+        return addRequestIdHeader(response, requestId)
+      }
     }
 
     // Return markdown file
@@ -100,205 +126,314 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
 
 async function generatePDF(markdown: string, title: string): Promise<Buffer> {
   try {
-    // Parse markdown directly (better than HTML conversion)
-    const pdfBuffer = await generatePDFWithJsPDF(markdown, title)
-    
+    // Use puppeteer for PDF generation
+    const pdfBuffer = await generatePDFWithPuppeteer(markdown, title)
     return pdfBuffer
-  } catch (error) {
-    console.error('PDF generation error:', error)
-    throw new Error('Failed to generate PDF')
+  } catch (puppeteerError) {
+    Logger.error('Puppeteer PDF generation failed, falling back to markdown', puppeteerError, { title })
+    
+    // Fallback: return markdown as text file
+    const fallbackContent = `# ${title}\n\n${markdown}`
+    return Buffer.from(fallbackContent, 'utf-8')
   }
 }
 
-async function generatePDFWithJsPDF(markdown: string, title: string): Promise<Buffer> {
+async function generatePDFWithPuppeteer(markdown: string, title: string): Promise<Buffer> {
+  let browser
   try {
-    // Initialize jsPDF
-    const doc = new jsPDF({
-      orientation: 'portrait',
-      unit: 'mm',
-      format: 'a4'
+    // Convert markdown to HTML
+    const html = await marked(markdown)
+    
+    // Create complete HTML document with styling
+    const htmlTemplate = createHTMLTemplate(html, title)
+    
+    // Launch puppeteer
+    browser = await puppeteer.launch({ 
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'] 
     })
-
-    // Set font
-    doc.setFont('helvetica')
+    const page = await browser.newPage()
     
-    // Add title
-    doc.setFontSize(20)
-    doc.text(title, 20, 30)
+    // Set content and wait for it to load
+    await page.setContent(htmlTemplate, { waitUntil: 'networkidle0' })
     
-    // Add subtitle
-    doc.setFontSize(12)
-    doc.text('Product Requirements Document', 20, 40)
-    
-    // Add line under title
-    doc.setLineWidth(0.5)
-    doc.line(20, 45, 190, 45)
-    
-    // Process markdown content directly
-    let yPosition = 60
-    const lineHeight = 7
-    const pageHeight = 280
-    const margin = 20
-    const maxWidth = 170
-    
-    // Split markdown into lines and process
-    const lines = markdown.split('\n')
-    let inCodeBlock = false
-    let codeBlockContent = []
-    
-    for (const line of lines) {
-      // Handle code blocks
-      if (line.startsWith('```')) {
-        if (inCodeBlock) {
-          // End of code block - add the content
-          if (codeBlockContent.length > 0) {
-            yPosition += lineHeight
-            doc.setFontSize(9)
-            doc.setFont('courier', 'normal')
-            doc.text('Code:', margin, yPosition)
-            yPosition += lineHeight
-            
-            for (const codeLine of codeBlockContent) {
-              if (yPosition > pageHeight) {
-                doc.addPage()
-                yPosition = 30
-              }
-              doc.text(codeLine.substring(0, 60), margin + 5, yPosition) // Limit code line width
-              yPosition += lineHeight * 0.8
-            }
-          }
-          codeBlockContent = []
-          inCodeBlock = false
-        } else {
-          inCodeBlock = true
-        }
-        continue
+    // Generate PDF
+    const pdfBuffer = await page.pdf({
+      format: 'A4',
+      printBackground: true,
+      displayHeaderFooter: true,
+      headerTemplate: `
+        <div style="
+          font-size: 10px;
+          color: #374151;
+          padding: 20px 40px 0 46px;
+          width: 100%;
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+        ">
+          <span style="font-weight: 600;">${title}</span>
+          <span>Page <span class="pageNumber"></span> of <span class="totalPages"></span></span>
+        </div>
+      `,
+      footerTemplate: `
+        <div style="
+          font-size: 9px;
+          color: #9ca3af;
+          padding: 0 40px 20px 46px;
+          width: 100%;
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+        ">
+          <span>Confidential — AI PRD Assistant</span>
+          <span>${title}</span>
+          <span>Page <span class="pageNumber"></span> of <span class="totalPages"></span></span>
+        </div>
+      `,
+      margin: { 
+        top: '60px', 
+        bottom: '50px', 
+        left: '20px', 
+        right: '20px' 
       }
-      
-      if (inCodeBlock) {
-        codeBlockContent.push(line)
-        continue
-      }
-      
-      // Skip empty lines
-      if (line.trim() === '') {
-        yPosition += lineHeight / 2
-        continue
-      }
-      
-      // Check if we need a new page
-      if (yPosition > pageHeight) {
-        doc.addPage()
-        yPosition = 30
-      }
-      
-      // Handle headers
-      if (line.startsWith('# ')) {
-        doc.setFontSize(16)
-        doc.setFont('helvetica', 'bold')
-        const headerText = line.substring(2).trim()
-        doc.text(headerText, margin, yPosition)
-        yPosition += lineHeight * 1.5
-      } else if (line.startsWith('## ')) {
-        doc.setFontSize(14)
-        doc.setFont('helvetica', 'bold')
-        const headerText = line.substring(3).trim()
-        doc.text(headerText, margin, yPosition)
-        yPosition += lineHeight * 1.3
-      } else if (line.startsWith('### ')) {
-        doc.setFontSize(12)
-        doc.setFont('helvetica', 'bold')
-        const headerText = line.substring(4).trim()
-        doc.text(headerText, margin, yPosition)
-        yPosition += lineHeight * 1.2
-      } else if (line.startsWith('#### ')) {
-        doc.setFontSize(11)
-        doc.setFont('helvetica', 'bold')
-        const headerText = line.substring(5).trim()
-        doc.text(headerText, margin, yPosition)
-        yPosition += lineHeight * 1.1
-      } else if (line.startsWith('- ') || line.startsWith('* ')) {
-        // Bullet points
-        doc.setFontSize(10)
-        doc.setFont('helvetica', 'normal')
-        const bulletText = processInlineFormatting(line.substring(2).trim())
-        doc.text('• ' + bulletText, margin + 5, yPosition)
-        yPosition += lineHeight
-      } else if (line.match(/^\d+\. /)) {
-        // Numbered lists
-        doc.setFontSize(10)
-        doc.setFont('helvetica', 'normal')
-        const listText = processInlineFormatting(line)
-        doc.text(listText, margin + 5, yPosition)
-        yPosition += lineHeight
-      } else if (line.startsWith('> ')) {
-        // Blockquotes
-        doc.setFontSize(10)
-        doc.setFont('helvetica', 'italic')
-        const quoteText = line.substring(2).trim()
-        doc.text('"' + quoteText + '"', margin + 5, yPosition)
-        yPosition += lineHeight
-      } else {
-        // Regular text with inline formatting
-        doc.setFontSize(10)
-        doc.setFont('helvetica', 'normal')
-        
-        const processedLine = processInlineFormatting(line)
-        
-        // Handle long lines by wrapping them
-        const words = processedLine.split(' ')
-        let currentLine = ''
-        
-        for (const word of words) {
-          const testLine = currentLine + (currentLine ? ' ' : '') + word
-          const textWidth = doc.getTextWidth(testLine)
-          
-          if (textWidth > maxWidth && currentLine) {
-            doc.text(currentLine, margin, yPosition)
-            currentLine = word
-            yPosition += lineHeight
-            
-            if (yPosition > pageHeight) {
-              doc.addPage()
-              yPosition = 30
-            }
-          } else {
-            currentLine = testLine
-          }
-        }
-        
-        if (currentLine) {
-          doc.text(currentLine, margin, yPosition)
-          yPosition += lineHeight
-        }
-      }
+    })
+    
+    return Buffer.from(pdfBuffer)
+  } finally {
+    if (browser) {
+      await browser.close()
     }
-    
-    // Add footer
-    const pageCount = doc.internal.pages.length - 1
-    for (let i = 1; i <= pageCount; i++) {
-      doc.setPage(i)
-      doc.setFontSize(8)
-      doc.setFont('helvetica', 'italic')
-      doc.text(`Generated by AI PRD Assistant on ${new Date().toLocaleDateString()}`, margin, 285)
-      doc.text(`Page ${i} of ${pageCount}`, 190 - doc.getTextWidth(`Page ${i} of ${pageCount}`), 285)
-    }
-    
-    // Get PDF as buffer
-    const pdfBuffer = Buffer.from(doc.output('arraybuffer'))
-    return pdfBuffer
-  } catch (error) {
-    console.error('jsPDF generation error:', error)
-    throw new Error('Failed to generate PDF with jsPDF')
   }
 }
 
-function processInlineFormatting(text: string): string {
-  // Process inline markdown formatting
-  return text
-    .replace(/\*\*(.*?)\*\*/g, '$1') // Remove **bold** markers (jsPDF doesn't support bold in normal text)
-    .replace(/\*(.*?)\*/g, '$1') // Remove *italic* markers
-    .replace(/`(.*?)`/g, '$1') // Remove `code` markers
-    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1') // Convert [text](url) to just text
-    .trim()
+function createHTMLTemplate(content: string, title: string): string {
+  return `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${title} - PRD</title>
+  <style>
+    @page {
+      size: A4;
+      margin: 60px 20px 50px 20px;
+    }
+    
+    * {
+      box-sizing: border-box;
+    }
+    
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      font-size: 11px;
+      line-height: 1.6;
+      color: #374151;
+      margin: 0;
+      padding: 0;
+      background: linear-gradient(to right, #6366f1 6px, transparent 6px);
+      background-size: 6px 100%;
+      background-position: left top;
+      background-repeat: repeat-y;
+    }
+    
+    .cover-page {
+      background: #1e2a4a;
+      color: white;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      text-align: center;
+      page-break-after: always;
+    }
+    
+    .cover-page h1 {
+      font-size: 48px;
+      font-weight: 700;
+      margin: 0 0 20px 0;
+    }
+    
+    .cover-page h2 {
+      font-size: 28px;
+      font-weight: 600;
+      margin: 0 0 30px 0;
+    }
+    
+    .cover-page .accent-line {
+      width: 130px;
+      height: 2px;
+      background: #6366f1;
+      margin: 30px 0;
+    }
+    
+    .cover-page .meta {
+      font-size: 14px;
+      color: #e5e7eb;
+      margin: 40px 0 10px 0;
+    }
+    
+    .cover-page .date {
+      font-size: 12px;
+      color: #9ca3af;
+      position: absolute;
+      bottom: 30px;
+      right: 40px;
+    }
+    
+    .content-page {
+      padding-left: 26px;
+    }
+    
+    h1 {
+      font-size: 18px;
+      font-weight: 700;
+      color: #6366f1;
+      margin: 0 0 8px 0;
+      page-break-before: always;
+    }
+    
+    h1:first-of-type {
+      page-break-before: auto;
+    }
+    
+    h2 {
+      font-size: 13px;
+      font-weight: 700;
+      color: #374151;
+      margin: 20px 0 4px 0;
+    }
+    
+    h3 {
+      font-size: 11px;
+      font-weight: 700;
+      color: #374151;
+      margin: 16px 0 4px 0;
+    }
+    
+    p {
+      margin: 0 0 8px 0;
+    }
+    
+    ul, ol {
+      margin: 0 0 8px 0;
+      padding-left: 20px;
+    }
+    
+    li {
+      margin-bottom: 4px;
+    }
+    
+    strong, b {
+      font-weight: 700;
+    }
+    
+    hr {
+      border: none;
+      border-top: 1px solid #e5e7eb;
+      margin: 20px 0;
+    }
+    
+    .section-divider {
+      border-bottom: 1px solid #f3f4f6;
+      margin: 0 0 12px 0;
+      padding-bottom: 6px;
+    }
+  </style>
+</head>
+<body>
+  <!-- Cover Page -->
+  <div class="cover-page">
+    <h1>PRD</h1>
+    <h2>${title}</h2>
+    <div class="accent-line"></div>
+    <div class="meta">Generated by AI PRD Assistant</div>
+    <div class="date">${new Date().toLocaleDateString()}</div>
+  </div>
+  
+  <!-- Content Pages -->
+  <div class="content-page">
+    ${content}
+  </div>
+</body>
+</html>
+  `
+}
+
+function removeSectionSummaries(markdown: string): string {
+  const normalized = markdown.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+  const lines = normalized.split('\n')
+  const result: string[] = []
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+
+    // Remove ONLY the ### Summary heading line itself
+    // Keep all content that follows — it is the real section content
+    const isSummaryHeading =
+      line.match(/^###\s+Summary of the PRD/i) ||
+      line.match(/^###\s+Summary of the Project Requirements/i) ||
+      line.match(/^###\s+Product Requirements Document/i)
+
+    if (isSummaryHeading) {
+      // Skip ONLY this one heading line, continue to next line
+      // The content below it will be preserved normally
+      continue
+    }
+
+    result.push(line)
+  }
+
+  return result.join('\n')
+}
+
+function deduplicatePRDSections(markdown: string): string {
+  // Normalize line endings
+  const normalized = markdown.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+  
+  const lines = normalized.split('\n')
+  const seenHeadings = new Set<string>()
+  const result: string[] = []
+  let skipSection = false
+  
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    
+    // Check if this is a ## section heading (level 2 only)
+    const h2Match = line.match(/^##\s+(.+)$/)
+    
+    if (h2Match) {
+      const headingKey = h2Match[1].trim().toLowerCase()
+      
+      if (seenHeadings.has(headingKey)) {
+        // Duplicate — remove previous content and keep this one (last-wins strategy)
+        // Find and remove previous section content
+        const previousHeadingIndex = result.findIndex(line => 
+          line.match(/^##\s+/) && 
+          line.toLowerCase().includes(headingKey)
+        )
+        
+        if (previousHeadingIndex !== -1) {
+          // Remove everything from previous heading to this point
+          result.splice(previousHeadingIndex)
+        }
+        
+        seenHeadings.add(headingKey)
+        skipSection = false
+        result.push(line)
+      } else {
+        seenHeadings.add(headingKey)
+        skipSection = false
+        result.push(line)
+      }
+    } else if (skipSection) {
+      // Skip all lines until next ## heading
+      continue
+    } else {
+      result.push(line)
+    }
+  }
+  
+  return result.join('\n')
 }
